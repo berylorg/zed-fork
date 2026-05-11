@@ -7,7 +7,6 @@ use calloop::{
 };
 use collections::HashMap;
 use core::str;
-use http_client::Url;
 use log::Level;
 use smallvec::SmallVec;
 use std::{
@@ -18,6 +17,7 @@ use std::{
     rc::{Rc, Weak},
     time::{Duration, Instant},
 };
+use url::Url;
 use util::ResultExt;
 
 use x11rb::{

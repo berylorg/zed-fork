@@ -127,11 +127,20 @@ impl TestAppContext {
         let foreground_executor = ForegroundExecutor::new(arc_dispatcher);
         let platform = TestPlatform::new(background_executor.clone(), foreground_executor.clone());
         let asset_source = Arc::new(());
+        #[cfg(feature = "http-client-test-support")]
         let http_client = http_client::FakeHttpClient::with_404_response();
+        #[cfg(all(feature = "http-client", not(feature = "http-client-test-support")))]
+        let http_client = Arc::new(super::NullHttpClient);
         let text_system = Arc::new(TextSystem::new(platform.text_system()));
+        let app = App::new_app(
+            platform.clone(),
+            asset_source,
+            #[cfg(feature = "http-client")]
+            http_client,
+        );
 
         Self {
-            app: App::new_app(platform.clone(), asset_source, http_client),
+            app,
             background_executor,
             foreground_executor,
             dispatcher,

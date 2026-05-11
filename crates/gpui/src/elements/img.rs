@@ -5,9 +5,13 @@ use crate::{
     SMOOTH_SVG_SCALE_FACTOR, SharedString, SharedUri, StyleRefinement, Styled, SvgSize, Task,
     Window, px, swap_rgba_pa_to_bgra,
 };
-use anyhow::{Context as _, Result};
+#[cfg(feature = "http-client")]
+use anyhow::Context as _;
+use anyhow::Result;
 
-use futures::{AsyncReadExt, Future};
+#[cfg(feature = "http-client")]
+use futures::AsyncReadExt;
+use futures::Future;
 use image::{
     AnimationDecoder, DynamicImage, Frame, ImageBuffer, ImageError, ImageFormat, Rgba,
     codecs::{gif::GifDecoder, webp::WebPDecoder},
@@ -50,7 +54,7 @@ pub enum ImageSource {
 }
 
 fn is_uri(uri: &str) -> bool {
-    http_client::Uri::from_str(uri).is_ok()
+    http::Uri::from_str(uri).is_ok()
 }
 
 impl From<SharedUri> for ImageSource {
@@ -592,6 +596,7 @@ impl Asset for ImageAssetLoader {
         source: Self::Source,
         cx: &mut App,
     ) -> impl Future<Output = Self::Output> + Send + 'static {
+        #[cfg(feature = "http-client")]
         let client = cx.http_client();
         // TODO: Can we make SVGs always rescale?
         // let scale_factor = cx.scale_factor();
@@ -601,23 +606,30 @@ impl Asset for ImageAssetLoader {
             let bytes = match source.clone() {
                 Resource::Path(uri) => fs::read(uri.as_ref())?,
                 Resource::Uri(uri) => {
-                    let mut response = client
-                        .get(uri.as_ref(), ().into(), true)
-                        .await
-                        .with_context(|| format!("loading image asset from {uri:?}"))?;
-                    let mut body = Vec::new();
-                    response.body_mut().read_to_end(&mut body).await?;
-                    if !response.status().is_success() {
-                        let mut body = String::from_utf8_lossy(&body).into_owned();
-                        let first_line = body.lines().next().unwrap_or("").trim_end();
-                        body.truncate(first_line.len());
-                        return Err(ImageCacheError::BadStatus {
-                            uri,
-                            status: response.status(),
-                            body,
-                        });
+                    #[cfg(feature = "http-client")]
+                    {
+                        let mut response = client
+                            .get(uri.as_ref(), ().into(), true)
+                            .await
+                            .with_context(|| format!("loading image asset from {uri:?}"))?;
+                        let mut body = Vec::new();
+                        response.body_mut().read_to_end(&mut body).await?;
+                        if !response.status().is_success() {
+                            let mut body = String::from_utf8_lossy(&body).into_owned();
+                            let first_line = body.lines().next().unwrap_or("").trim_end();
+                            body.truncate(first_line.len());
+                            return Err(ImageCacheError::BadStatus {
+                                uri,
+                                status: response.status(),
+                                body,
+                            });
+                        }
+                        body
                     }
-                    body
+                    #[cfg(not(feature = "http-client"))]
+                    {
+                        return Err(ImageCacheError::HttpClientUnsupported { uri });
+                    }
                 }
                 Resource::Embedded(path) => {
                     let data = asset_source.load(&path).ok().flatten();
@@ -727,9 +739,15 @@ pub enum ImageCacheError {
         /// The URI of the image.
         uri: SharedUri,
         /// The HTTP status code.
-        status: http_client::StatusCode,
+        status: http::StatusCode,
         /// The HTTP response body.
         body: String,
+    },
+    /// Remote URI loading requires GPUI's `http-client` feature.
+    #[error("HTTP image loading requires the `http-client` feature for {uri}")]
+    HttpClientUnsupported {
+        /// The URI of the image.
+        uri: SharedUri,
     },
     /// An error that occurred while processing an asset.
     #[error("asset error: {0}")]

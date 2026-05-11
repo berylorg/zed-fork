@@ -18,12 +18,18 @@ workspace = true
 
 [features]
 default = ["font-kit", "wayland", "x11", "windows-manifest"]
+http-client = ["dep:http_client"]
+http-client-test-support = [
+    "http-client",
+    "http_client/test-support",
+    "dep:reqwest_client",
+    "reqwest_client/test-support",
+]
 test-support = [
     "leak-detection",
     "collections/test-support",
     "rand",
     "util/test-support",
-    "http_client/test-support",
     "wayland",
     "x11",
 ]
@@ -96,7 +102,8 @@ derive_more.workspace = true
 etagere = "0.2"
 futures.workspace = true
 gpui_macros.workspace = true
-http_client.workspace = true
+http.workspace = true
+http_client = { workspace = true, optional = true }
 image.workspace = true
 inventory.workspace = true
 itertools.workspace = true
@@ -109,6 +116,7 @@ profiling.workspace = true
 rand = { optional = true, workspace = true }
 raw-window-handle = "0.6"
 refineable.workspace = true
+reqwest_client = { workspace = true, optional = true }
 resvg = { version = "0.45.0", default-features = false, features = [
     "text",
     "system-fonts",
@@ -130,6 +138,7 @@ sum_tree.workspace = true
 taffy = "=0.9.0"
 thiserror.workspace = true
 util.workspace = true
+url.workspace = true
 uuid.workspace = true
 waker-fn = "1.2.0"
 lyon = "1.0"
@@ -237,11 +246,9 @@ windows-registry = "0.5"
 backtrace = "0.3"
 collections = { workspace = true, features = ["test-support"] }
 env_logger.workspace = true
-http_client = { workspace = true, features = ["test-support"] }
 lyon = { version = "1.0", features = ["extra"] }
 pretty_assertions.workspace = true
 rand.workspace = true
-reqwest_client = { workspace = true, features = ["test-support"] }
 unicode-segmentation.workspace = true
 util = { workspace = true, features = ["test-support"] }
 
