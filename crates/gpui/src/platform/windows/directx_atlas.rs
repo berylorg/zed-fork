@@ -26,11 +26,14 @@ struct DirectXAtlasState {
 
 struct DirectXAtlasTexture {
     id: AtlasTextureId,
+    size: Size<DevicePixels>,
     bytes_per_pixel: u32,
     allocator: BucketedAtlasAllocator,
     texture: ID3D11Texture2D,
     view: [Option<ID3D11ShaderResourceView>; 1],
     live_atlas_keys: u32,
+    cpu_mirror: Vec<u8>,
+    dirty_bounds: Option<Bounds<DevicePixels>>,
 }
 
 impl DirectXAtlas {
@@ -48,8 +51,10 @@ impl DirectXAtlas {
         &self,
         id: AtlasTextureId,
     ) -> [Option<ID3D11ShaderResourceView>; 1] {
-        let lock = self.0.lock();
-        let tex = lock.texture(id);
+        let mut lock = self.0.lock();
+        let device_context = lock.device_context.clone();
+        let tex = lock.texture_mut(id);
+        tex.flush(&device_context);
         tex.view.clone()
     }
 
@@ -85,8 +90,8 @@ impl PlatformAtlas for DirectXAtlas {
             let tile = lock
                 .allocate(size, key.texture_kind())
                 .ok_or_else(|| anyhow::anyhow!("failed to allocate"))?;
-            let texture = lock.texture(tile.texture_id);
-            texture.upload(&lock.device_context, tile.bounds, &bytes);
+            let texture = lock.texture_mut(tile.texture_id);
+            texture.upload(tile.bounds, &bytes);
             lock.tiles_by_key.insert(key.clone(), tile.clone());
             Ok(Some(tile))
         }
@@ -218,11 +223,19 @@ impl DirectXAtlasState {
                 index: index.unwrap_or(texture_list.textures.len()) as u32,
                 kind,
             },
+            size,
             bytes_per_pixel,
             allocator: etagere::BucketedAtlasAllocator::new(size.into()),
             texture,
             view,
             live_atlas_keys: 0,
+            cpu_mirror: vec![
+                0;
+                size.width.0.max(0) as usize
+                    * size.height.0.max(0) as usize
+                    * bytes_per_pixel as usize
+            ],
+            dirty_bounds: None,
         };
         if let Some(ix) = index {
             texture_list.textures[ix] = Some(atlas_texture);
@@ -233,12 +246,12 @@ impl DirectXAtlasState {
         }
     }
 
-    fn texture(&self, id: AtlasTextureId) -> &DirectXAtlasTexture {
+    fn texture_mut(&mut self, id: AtlasTextureId) -> &mut DirectXAtlasTexture {
         let textures = match id.kind {
-            crate::AtlasTextureKind::Monochrome => &self.monochrome_textures,
-            crate::AtlasTextureKind::Polychrome => &self.polychrome_textures,
+            crate::AtlasTextureKind::Monochrome => &mut self.monochrome_textures,
+            crate::AtlasTextureKind::Polychrome => &mut self.polychrome_textures,
         };
-        textures[id.index as usize].as_ref().unwrap()
+        textures.textures[id.index as usize].as_mut().unwrap()
     }
 }
 
@@ -258,12 +271,65 @@ impl DirectXAtlasTexture {
         Some(tile)
     }
 
-    fn upload(
-        &self,
-        device_context: &ID3D11DeviceContext,
-        bounds: Bounds<DevicePixels>,
-        bytes: &[u8],
-    ) {
+    fn upload(&mut self, bounds: Bounds<DevicePixels>, bytes: &[u8]) {
+        let Some(bounds) = self.clamp_bounds(bounds) else {
+            return;
+        };
+
+        let bytes_per_pixel = self.bytes_per_pixel as usize;
+        let texture_width = self.size.width.0.max(0) as usize;
+        let source_width = bounds.size.width.0.max(0) as usize;
+        let source_height = bounds.size.height.0.max(0) as usize;
+        let source_pitch = source_width * bytes_per_pixel;
+        let destination_pitch = texture_width * bytes_per_pixel;
+        let destination_x = bounds.left().0.max(0) as usize;
+        let destination_y = bounds.top().0.max(0) as usize;
+
+        if source_pitch == 0 || source_height == 0 {
+            return;
+        }
+
+        for row in 0..source_height {
+            let source_start = row * source_pitch;
+            let source_end = source_start + source_pitch;
+            if source_end > bytes.len() {
+                return;
+            }
+
+            let destination_start =
+                (destination_y + row) * destination_pitch + destination_x * bytes_per_pixel;
+            let destination_end = destination_start + source_pitch;
+            if destination_end > self.cpu_mirror.len() {
+                return;
+            }
+
+            self.cpu_mirror[destination_start..destination_end]
+                .copy_from_slice(&bytes[source_start..source_end]);
+        }
+
+        self.dirty_bounds = Some(match self.dirty_bounds {
+            Some(dirty_bounds) => dirty_bounds.union(&bounds),
+            None => bounds,
+        });
+    }
+
+    fn flush(&mut self, device_context: &ID3D11DeviceContext) {
+        let Some(bounds) = self.dirty_bounds.take() else {
+            return;
+        };
+        let Some(bounds) = self.clamp_bounds(bounds) else {
+            return;
+        };
+
+        let bytes_per_pixel = self.bytes_per_pixel as usize;
+        let texture_width = self.size.width.0.max(0) as usize;
+        let row_pitch = texture_width * bytes_per_pixel;
+        let source_offset = bounds.top().0.max(0) as usize * row_pitch
+            + bounds.left().0.max(0) as usize * bytes_per_pixel;
+        let Some(source) = self.cpu_mirror.get(source_offset..) else {
+            return;
+        };
+
         unsafe {
             device_context.UpdateSubresource(
                 &self.texture,
@@ -276,11 +342,33 @@ impl DirectXAtlasTexture {
                     bottom: bounds.bottom().0 as u32,
                     back: 1,
                 }),
-                bytes.as_ptr() as _,
-                bounds.size.width.to_bytes(self.bytes_per_pixel as u8),
+                source.as_ptr() as _,
+                row_pitch as u32,
                 0,
             );
         }
+    }
+
+    fn clamp_bounds(&self, bounds: Bounds<DevicePixels>) -> Option<Bounds<DevicePixels>> {
+        let left = bounds.left().0.max(0).min(self.size.width.0);
+        let top = bounds.top().0.max(0).min(self.size.height.0);
+        let right = bounds.right().0.max(left).min(self.size.width.0);
+        let bottom = bounds.bottom().0.max(top).min(self.size.height.0);
+
+        if right <= left || bottom <= top {
+            return None;
+        }
+
+        Some(Bounds {
+            origin: Point {
+                x: DevicePixels(left),
+                y: DevicePixels(top),
+            },
+            size: Size {
+                width: DevicePixels(right - left),
+                height: DevicePixels(bottom - top),
+            },
+        })
     }
 
     fn decrement_ref_count(&mut self) {
