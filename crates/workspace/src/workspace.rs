@@ -3896,7 +3896,8 @@ impl Workspace {
     }
 
     fn active_project_path(&self, cx: &App) -> Option<ProjectPath> {
-        self.active_item(cx).and_then(|item| item.project_path(cx))
+        self.active_item(cx)
+            .and_then(|item| item.active_project_path(cx))
     }
 
     pub fn most_recent_active_path(&self, cx: &App) -> Option<PathBuf> {

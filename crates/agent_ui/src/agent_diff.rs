@@ -566,6 +566,10 @@ impl Item for AgentDiffPane {
             .for_each_project_item(cx, f)
     }
 
+    fn active_project_path(&self, cx: &App) -> Option<project::ProjectPath> {
+        self.editor.read(cx).rhs_editor().active_project_path(cx)
+    }
+
     fn set_nav_history(
         &mut self,
         nav_history: ItemNavHistory,

@@ -26,7 +26,7 @@ use ui::{Color, Icon, IconName, Label, LabelCommon as _, SharedString};
 use util::paths::PathExt;
 
 use workspace::{
-    Item, ItemNavHistory, Workspace,
+    Item, ItemHandle, ItemNavHistory, Workspace,
     item::{ItemEvent, SaveOptions, TabContentParams},
     searchable::SearchableItemHandle,
 };
@@ -375,6 +375,10 @@ impl Item for TextDiffView {
         f: &mut dyn FnMut(gpui::EntityId, &dyn project::ProjectItem),
     ) {
         self.diff_editor.read(cx).for_each_project_item(cx, f)
+    }
+
+    fn active_project_path(&self, cx: &App) -> Option<project::ProjectPath> {
+        self.diff_editor.active_project_path(cx)
     }
 
     fn set_nav_history(

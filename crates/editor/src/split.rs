@@ -31,7 +31,7 @@ use crate::{
     split_editor_view::{SplitEditorState, SplitEditorView},
 };
 use workspace::{
-    ActivatePaneLeft, ActivatePaneRight, Item, ToolbarItemLocation, Workspace,
+    ActivatePaneLeft, ActivatePaneRight, Item, ItemHandle, ToolbarItemLocation, Workspace,
     item::{ItemBufferKind, ItemEvent, SaveOptions, TabContentParams},
     searchable::{SearchEvent, SearchToken, SearchableItem, SearchableItemHandle},
 };
@@ -1749,6 +1749,10 @@ impl Item for SplittableEditor {
         f: &mut dyn FnMut(gpui::EntityId, &dyn project::ProjectItem),
     ) {
         self.rhs_editor.read(cx).for_each_project_item(cx, f)
+    }
+
+    fn active_project_path(&self, cx: &App) -> Option<project::ProjectPath> {
+        self.rhs_editor.active_project_path(cx)
     }
 
     fn buffer_kind(&self, cx: &App) -> ItemBufferKind {

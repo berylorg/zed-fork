@@ -749,6 +749,10 @@ impl Item for BufferDiagnosticsEditor {
         self.editor.for_each_project_item(cx, f);
     }
 
+    fn active_project_path(&self, cx: &App) -> Option<project::ProjectPath> {
+        self.editor.active_project_path(cx)
+    }
+
     fn has_conflict(&self, cx: &App) -> bool {
         self.multibuffer.read(cx).has_conflict(cx)
     }

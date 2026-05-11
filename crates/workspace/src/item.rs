@@ -122,6 +122,11 @@ impl Settings for PreviewTabsSettings {
 pub enum ItemEvent {
     CloseItem,
     UpdateTab,
+    /// Signals that the user-visible location within the item may have moved
+    /// (e.g. cursor changed excerpt in a multibuffer, or the buffer reparsed).
+    /// The workspace uses this to refresh the active project path so consumers
+    /// like the project panel can auto-reveal the new location; breadcrumbs use
+    /// it to redraw.
     UpdateBreadcrumbs,
     Edit,
 }
@@ -233,6 +238,14 @@ pub trait Item: Focusable + EventEmitter<Self::Event> + Render + Sized {
         _: &App,
         _: &mut dyn FnMut(EntityId, &dyn project::ProjectItem),
     ) {
+    }
+
+    /// Project path representing the user's currently focused location inside the
+    /// item. Multibuffer-backed items override this to follow the cursor.
+    /// Returning `None` makes the [`ItemHandle::active_project_path`] fall back
+    /// to [`ItemHandle::project_path`].
+    fn active_project_path(&self, _cx: &App) -> Option<ProjectPath> {
+        None
     }
     fn buffer_kind(&self, _cx: &App) -> ItemBufferKind {
         ItemBufferKind::None
@@ -475,6 +488,10 @@ pub trait ItemHandle: 'static + Send {
         cx: &App,
     ) -> AnyElement;
     fn project_path(&self, cx: &App) -> Option<ProjectPath>;
+    /// Project path representing the user's currently focused location within the
+    /// item. Defaults to [`Self::project_path`]; multibuffer-backed items can
+    /// override to follow the cursor across excerpts.
+    fn active_project_path(&self, cx: &App) -> Option<ProjectPath>;
     fn project_entry_ids(&self, cx: &App) -> SmallVec<[ProjectEntryId; 3]>;
     fn project_paths(&self, cx: &App) -> SmallVec<[ProjectPath; 3]>;
     fn project_item_model_ids(&self, cx: &App) -> SmallVec<[EntityId; 3]>;
@@ -654,6 +671,12 @@ impl<T: Item> ItemHandle for Entity<T> {
             });
         }
         result
+    }
+
+    fn active_project_path(&self, cx: &App) -> Option<ProjectPath> {
+        self.read(cx)
+            .active_project_path(cx)
+            .or_else(|| self.project_path(cx))
     }
 
     fn workspace_settings<'a>(&self, cx: &'a App) -> &'a WorkspaceSettings {
@@ -907,6 +930,12 @@ impl<T: Item> ItemHandle for Entity<T> {
                                     cx.emit(pane::Event::ChangeItemTitle);
                                     cx.notify();
                                 });
+                            }
+                        }
+
+                        ItemEvent::UpdateBreadcrumbs => {
+                            if pane == workspace.active_pane {
+                                workspace.active_item_path_changed(false, window, cx);
                             }
                         }
 

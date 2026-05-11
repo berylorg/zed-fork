@@ -809,6 +809,18 @@ impl Item for Editor {
             .for_each_buffer(&mut |buffer| f(buffer.entity_id(), buffer.read(cx)));
     }
 
+    fn active_project_path(&self, cx: &App) -> Option<ProjectPath> {
+        let multi_buffer = self.buffer.read(cx);
+        if multi_buffer.is_singleton() {
+            return None;
+        }
+        let snapshot = multi_buffer.snapshot(cx);
+        let head = self.selections.newest_anchor().head();
+        let (buffer_snapshot, _) = snapshot.excerpt_containing(head..head)?;
+        let buffer = multi_buffer.buffer(buffer_snapshot.remote_id())?;
+        buffer.read(cx).project_path(cx)
+    }
+
     fn buffer_kind(&self, cx: &App) -> ItemBufferKind {
         match self.buffer.read(cx).is_singleton() {
             true => ItemBufferKind::Singleton,
