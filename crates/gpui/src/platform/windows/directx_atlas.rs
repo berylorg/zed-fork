@@ -10,8 +10,9 @@ use windows::Win32::Graphics::{
 };
 
 use crate::{
-    AtlasKey, AtlasTextureId, AtlasTextureKind, AtlasTile, Bounds, DevicePixels, PlatformAtlas,
-    Point, Size, platform::AtlasTextureList,
+    AtlasDiagnosticSnapshot, AtlasImageTileDiagnostic, AtlasKey, AtlasKindDiagnostic,
+    AtlasTextureId, AtlasTextureKind, AtlasTile, Bounds, DevicePixels, PlatformAtlas, Point, Size,
+    platform::AtlasTextureList,
 };
 
 pub(crate) struct DirectXAtlas(Mutex<DirectXAtlasState>);
@@ -34,6 +35,10 @@ struct DirectXAtlasTexture {
     live_atlas_keys: u32,
     cpu_mirror: Vec<u8>,
     dirty_bounds: Option<Bounds<DevicePixels>>,
+    upload_calls: u64,
+    upload_bytes: u64,
+    flush_calls: u64,
+    flush_bytes: u64,
 }
 
 impl DirectXAtlas {
@@ -123,9 +128,97 @@ impl PlatformAtlas for DirectXAtlas {
             }
         }
     }
+
+    fn diagnostic_snapshot(&self) -> AtlasDiagnosticSnapshot {
+        self.0.lock().diagnostic_snapshot()
+    }
 }
 
 impl DirectXAtlasState {
+    fn diagnostic_snapshot(&self) -> AtlasDiagnosticSnapshot {
+        const MAX_IMAGE_TILE_DIAGNOSTIC_ITEMS: usize = 64;
+
+        let mut snapshot = AtlasDiagnosticSnapshot {
+            tile_count: self.tiles_by_key.len(),
+            ..Default::default()
+        };
+        for (key, tile) in &self.tiles_by_key {
+            match key {
+                AtlasKey::Glyph(_) => snapshot.glyph_tiles += 1,
+                AtlasKey::Svg(_) => snapshot.svg_tiles += 1,
+                AtlasKey::Image(params) => {
+                    snapshot.image_tiles += 1;
+                    let tile_bytes_estimate = bounds_bytes(tile.bounds, 4);
+                    snapshot.image_tile_bytes_estimate = snapshot
+                        .image_tile_bytes_estimate
+                        .saturating_add(tile_bytes_estimate);
+                    if snapshot.image_tile_items.len() < MAX_IMAGE_TILE_DIAGNOSTIC_ITEMS {
+                        snapshot.image_tile_items.push(AtlasImageTileDiagnostic {
+                            render_image_id: params.image_id.0,
+                            frame_index: params.frame_index,
+                            width: tile.bounds.size.width.0.max(0) as u32,
+                            height: tile.bounds.size.height.0.max(0) as u32,
+                            tile_bytes_estimate,
+                        });
+                    } else {
+                        snapshot.image_tile_items_truncated = true;
+                    }
+                }
+            }
+        }
+        snapshot
+            .kinds
+            .push(self.texture_list_diagnostic("monochrome", &self.monochrome_textures));
+        snapshot
+            .kinds
+            .push(self.texture_list_diagnostic("polychrome", &self.polychrome_textures));
+        snapshot
+    }
+
+    fn texture_list_diagnostic(
+        &self,
+        kind: &str,
+        textures: &AtlasTextureList<DirectXAtlasTexture>,
+    ) -> AtlasKindDiagnostic {
+        let mut diagnostic = AtlasKindDiagnostic {
+            kind: kind.to_string(),
+            texture_count: 0,
+            free_texture_slots: textures.free_list.len(),
+            live_key_count: 0,
+            gpu_texture_bytes_estimate: 0,
+            cpu_mirror_bytes: 0,
+            dirty_texture_count: 0,
+            dirty_bytes_estimate: 0,
+            upload_calls: 0,
+            upload_bytes: 0,
+            flush_calls: 0,
+            flush_bytes: 0,
+        };
+        for texture in textures.textures.iter().flatten() {
+            diagnostic.texture_count += 1;
+            diagnostic.live_key_count = diagnostic
+                .live_key_count
+                .saturating_add(texture.live_atlas_keys as u64);
+            diagnostic.gpu_texture_bytes_estimate = diagnostic
+                .gpu_texture_bytes_estimate
+                .saturating_add(texture.texture_bytes());
+            diagnostic.cpu_mirror_bytes = diagnostic
+                .cpu_mirror_bytes
+                .saturating_add(texture.cpu_mirror.len() as u64);
+            if let Some(dirty_bounds) = texture.dirty_bounds {
+                diagnostic.dirty_texture_count += 1;
+                diagnostic.dirty_bytes_estimate = diagnostic
+                    .dirty_bytes_estimate
+                    .saturating_add(texture.bounds_bytes(dirty_bounds));
+            }
+            diagnostic.upload_calls = diagnostic.upload_calls.saturating_add(texture.upload_calls);
+            diagnostic.upload_bytes = diagnostic.upload_bytes.saturating_add(texture.upload_bytes);
+            diagnostic.flush_calls = diagnostic.flush_calls.saturating_add(texture.flush_calls);
+            diagnostic.flush_bytes = diagnostic.flush_bytes.saturating_add(texture.flush_bytes);
+        }
+        diagnostic
+    }
+
     fn allocate(
         &mut self,
         size: Size<DevicePixels>,
@@ -236,6 +329,10 @@ impl DirectXAtlasState {
                     * bytes_per_pixel as usize
             ],
             dirty_bounds: None,
+            upload_calls: 0,
+            upload_bytes: 0,
+            flush_calls: 0,
+            flush_bytes: 0,
         };
         if let Some(ix) = index {
             texture_list.textures[ix] = Some(atlas_texture);
@@ -311,6 +408,20 @@ impl DirectXAtlasTexture {
             Some(dirty_bounds) => dirty_bounds.union(&bounds),
             None => bounds,
         });
+        self.upload_calls = self.upload_calls.saturating_add(1);
+        self.upload_bytes = self.upload_bytes.saturating_add(bounds_bytes(
+            Bounds {
+                origin: Point {
+                    x: DevicePixels(0),
+                    y: DevicePixels(0),
+                },
+                size: Size {
+                    width: DevicePixels(source_width as i32),
+                    height: DevicePixels(source_height as i32),
+                },
+            },
+            self.bytes_per_pixel,
+        ));
     }
 
     fn flush(&mut self, device_context: &ID3D11DeviceContext) {
@@ -329,6 +440,7 @@ impl DirectXAtlasTexture {
         let Some(source) = self.cpu_mirror.get(source_offset..) else {
             return;
         };
+        let flush_bytes = self.bounds_bytes(bounds);
 
         unsafe {
             device_context.UpdateSubresource(
@@ -347,6 +459,8 @@ impl DirectXAtlasTexture {
                 0,
             );
         }
+        self.flush_calls = self.flush_calls.saturating_add(1);
+        self.flush_bytes = self.flush_bytes.saturating_add(flush_bytes);
     }
 
     fn clamp_bounds(&self, bounds: Bounds<DevicePixels>) -> Option<Bounds<DevicePixels>> {
@@ -378,6 +492,31 @@ impl DirectXAtlasTexture {
     fn is_unreferenced(&mut self) -> bool {
         self.live_atlas_keys == 0
     }
+
+    fn texture_bytes(&self) -> u64 {
+        bounds_bytes(
+            Bounds {
+                origin: Point {
+                    x: DevicePixels(0),
+                    y: DevicePixels(0),
+                },
+                size: self.size,
+            },
+            self.bytes_per_pixel,
+        )
+    }
+
+    fn bounds_bytes(&self, bounds: Bounds<DevicePixels>) -> u64 {
+        bounds_bytes(bounds, self.bytes_per_pixel)
+    }
+}
+
+fn bounds_bytes(bounds: Bounds<DevicePixels>, bytes_per_pixel: u32) -> u64 {
+    let width = bounds.size.width.0.max(0) as u64;
+    let height = bounds.size.height.0.max(0) as u64;
+    width
+        .saturating_mul(height)
+        .saturating_mul(bytes_per_pixel as u64)
 }
 
 impl From<Size<DevicePixels>> for etagere::Size {

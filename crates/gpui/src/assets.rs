@@ -67,6 +67,11 @@ impl RenderImage {
         }
     }
 
+    /// Get this image's decoded render id.
+    pub fn id(&self) -> ImageId {
+        self.id
+    }
+
     /// Convert this image into a byte slice.
     pub fn as_bytes(&self, frame_index: usize) -> Option<&[u8]> {
         self.data
@@ -78,6 +83,22 @@ impl RenderImage {
     pub fn size(&self, frame_index: usize) -> Size<DevicePixels> {
         let (width, height) = self.data[frame_index].buffer().dimensions();
         size(width.into(), height.into())
+    }
+
+    /// Get the size of this image frame in pixels, when the frame exists.
+    pub fn frame_size(&self, frame_index: usize) -> Option<Size<DevicePixels>> {
+        self.data.get(frame_index).map(|frame| {
+            let (width, height) = frame.buffer().dimensions();
+            size(width.into(), height.into())
+        })
+    }
+
+    /// Estimate decoded CPU bytes retained by all frames.
+    pub fn decoded_byte_len_estimate(&self) -> u64 {
+        self.data
+            .iter()
+            .map(|frame| frame.buffer().as_raw().len() as u64)
+            .sum()
     }
 
     /// Get the size of this image, in pixels for display, adjusted for the scale factor.

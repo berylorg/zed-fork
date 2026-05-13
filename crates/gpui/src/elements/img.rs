@@ -1,9 +1,9 @@
 use crate::{
-    AnyElement, AnyImageCache, App, Asset, AssetLogger, Bounds, DefiniteLength, Element, ElementId,
-    Entity, GlobalElementId, Hitbox, Image, ImageCache, InspectorElementId, InteractiveElement,
-    Interactivity, IntoElement, LayoutId, Length, ObjectFit, Pixels, RenderImage, Resource,
-    SMOOTH_SVG_SCALE_FACTOR, SharedString, SharedUri, StyleRefinement, Styled, SvgSize, Task,
-    Window, px, swap_rgba_pa_to_bgra,
+    AnyElement, AnyImageCache, App, Asset, AssetLogger, Bounds, DecodedImageAssetDiagnostic,
+    DefiniteLength, Element, ElementId, Entity, GlobalElementId, Hitbox, Image, ImageCache,
+    InspectorElementId, InteractiveElement, Interactivity, IntoElement, LayoutId, Length,
+    ObjectFit, Pixels, RenderImage, Resource, SMOOTH_SVG_SCALE_FACTOR, SharedString, SharedUri,
+    StyleRefinement, Styled, SvgSize, Task, Window, px, swap_rgba_pa_to_bgra,
 };
 #[cfg(feature = "http-client")]
 use anyhow::Context as _;
@@ -11,13 +11,14 @@ use anyhow::Result;
 
 #[cfg(feature = "http-client")]
 use futures::AsyncReadExt;
-use futures::Future;
+use futures::{Future, future::Shared};
 use image::{
     AnimationDecoder, DynamicImage, Frame, ImageBuffer, ImageError, ImageFormat, Rgba,
     codecs::{gif::GifDecoder, webp::WebPDecoder},
 };
 use smallvec::SmallVec;
 use std::{
+    any::{Any, TypeId},
     fs,
     io::{self, Cursor},
     ops::{Deref, DerefMut},
@@ -39,6 +40,72 @@ pub const LOADING_DELAY: Duration = Duration::from_millis(200);
 /// Note: that this is only for Resources, like URLs or file paths.
 /// Custom loaders, or external images will not use this asset loader
 pub type ImgResourceLoader = AssetLogger<ImageAssetLoader>;
+
+pub(crate) fn decoded_image_asset_diagnostic(
+    asset_type: TypeId,
+    asset_key_hash: u64,
+    asset: &dyn Any,
+) -> Option<DecodedImageAssetDiagnostic> {
+    if asset_type == TypeId::of::<AssetLogger<ImageDecoder>>() {
+        let task =
+            asset.downcast_ref::<Shared<Task<Result<Arc<RenderImage>, ImageCacheError>>>>()?;
+        return Some(decoded_image_asset_task_diagnostic(
+            "inline_image",
+            asset_key_hash,
+            task,
+        ));
+    }
+    if asset_type == TypeId::of::<ImgResourceLoader>() {
+        let task =
+            asset.downcast_ref::<Shared<Task<Result<Arc<RenderImage>, ImageCacheError>>>>()?;
+        return Some(decoded_image_asset_task_diagnostic(
+            "resource_image",
+            asset_key_hash,
+            task,
+        ));
+    }
+    None
+}
+
+pub(crate) fn completed_decoded_image_asset(
+    asset_type: TypeId,
+    asset: &dyn Any,
+) -> Option<Arc<RenderImage>> {
+    if asset_type == TypeId::of::<AssetLogger<ImageDecoder>>() {
+        let task =
+            asset.downcast_ref::<Shared<Task<Result<Arc<RenderImage>, ImageCacheError>>>>()?;
+        return completed_decoded_image_asset_task(task);
+    }
+    if asset_type == TypeId::of::<ImgResourceLoader>() {
+        let task =
+            asset.downcast_ref::<Shared<Task<Result<Arc<RenderImage>, ImageCacheError>>>>()?;
+        return completed_decoded_image_asset_task(task);
+    }
+    None
+}
+
+fn decoded_image_asset_task_diagnostic(
+    asset_kind: &'static str,
+    asset_key_hash: u64,
+    task: &Shared<Task<Result<Arc<RenderImage>, ImageCacheError>>>,
+) -> DecodedImageAssetDiagnostic {
+    match task.peek() {
+        Some(Ok(image)) => {
+            DecodedImageAssetDiagnostic::completed(asset_kind, asset_key_hash, image)
+        }
+        Some(Err(_)) => DecodedImageAssetDiagnostic::failed(asset_kind, asset_key_hash),
+        None => DecodedImageAssetDiagnostic::loading(asset_kind, asset_key_hash),
+    }
+}
+
+fn completed_decoded_image_asset_task(
+    task: &Shared<Task<Result<Arc<RenderImage>, ImageCacheError>>>,
+) -> Option<Arc<RenderImage>> {
+    match task.peek() {
+        Some(Ok(image)) => Some(image.clone()),
+        Some(Err(_)) | None => None,
+    }
+}
 
 /// A source of image content.
 #[derive(Clone)]

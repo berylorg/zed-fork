@@ -1,8 +1,10 @@
 use crate::{
-    AnyWindowHandle, AtlasKey, AtlasTextureId, AtlasTile, Bounds, DispatchEventResult, GpuSpecs,
-    Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow,
-    Point, PromptButton, RequestFrameOptions, Size, TestPlatform, TileId, WindowAppearance,
-    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowParams,
+    AnyWindowHandle, AtlasDiagnosticSnapshot, AtlasImageTileDiagnostic, AtlasKey,
+    AtlasKindDiagnostic, AtlasTextureId, AtlasTextureKind, AtlasTile, Bounds, DispatchEventResult,
+    GpuSpecs, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler,
+    PlatformRendererDiagnosticSnapshot, PlatformWindow, Point, PromptButton, RequestFrameOptions,
+    Size, TestPlatform, TileId, WindowAppearance, WindowBackgroundAppearance, WindowBounds,
+    WindowControlArea, WindowParams,
 };
 use collections::HashMap;
 use parking_lot::Mutex;
@@ -272,6 +274,16 @@ impl PlatformWindow for TestWindow {
         self.0.lock().sprite_atlas.clone()
     }
 
+    fn renderer_diagnostic_snapshot(&self) -> PlatformRendererDiagnosticSnapshot {
+        PlatformRendererDiagnosticSnapshot {
+            backend: "test".to_string(),
+            resources: Vec::new(),
+            atlas: self.0.lock().sprite_atlas.diagnostic_snapshot(),
+            pipeline_buffers: Vec::new(),
+            unavailable_reason: None,
+        }
+    }
+
     fn as_test(&mut self) -> Option<&mut TestWindow> {
         Some(self)
     }
@@ -341,7 +353,7 @@ impl PlatformAtlas for TestAtlas {
             crate::AtlasTile {
                 texture_id: AtlasTextureId {
                     index: texture_id,
-                    kind: crate::AtlasTextureKind::Monochrome,
+                    kind: key.texture_kind(),
                 },
                 tile_id: TileId(tile_id),
                 padding: 0,
@@ -359,4 +371,74 @@ impl PlatformAtlas for TestAtlas {
         let mut state = self.0.lock();
         state.tiles.remove(key);
     }
+
+    fn diagnostic_snapshot(&self) -> AtlasDiagnosticSnapshot {
+        self.0.lock().diagnostic_snapshot()
+    }
+}
+
+impl TestAtlasState {
+    fn diagnostic_snapshot(&self) -> AtlasDiagnosticSnapshot {
+        let mut snapshot = AtlasDiagnosticSnapshot {
+            tile_count: self.tiles.len(),
+            ..Default::default()
+        };
+        let mut monochrome_count = 0_u64;
+        let mut polychrome_count = 0_u64;
+        for (key, tile) in &self.tiles {
+            match key {
+                AtlasKey::Glyph(_) => snapshot.glyph_tiles += 1,
+                AtlasKey::Svg(_) => snapshot.svg_tiles += 1,
+                AtlasKey::Image(params) => {
+                    snapshot.image_tiles += 1;
+                    let tile_bytes_estimate = tile_bytes_estimate(tile);
+                    snapshot.image_tile_bytes_estimate = snapshot
+                        .image_tile_bytes_estimate
+                        .saturating_add(tile_bytes_estimate);
+                    snapshot.image_tile_items.push(AtlasImageTileDiagnostic {
+                        render_image_id: params.image_id.0,
+                        frame_index: params.frame_index,
+                        width: tile.bounds.size.width.0.max(0) as u32,
+                        height: tile.bounds.size.height.0.max(0) as u32,
+                        tile_bytes_estimate,
+                    });
+                }
+            }
+
+            match key.texture_kind() {
+                AtlasTextureKind::Monochrome => monochrome_count += 1,
+                AtlasTextureKind::Polychrome => polychrome_count += 1,
+            }
+        }
+        snapshot
+            .kinds
+            .push(test_atlas_kind_diagnostic("monochrome", monochrome_count));
+        snapshot
+            .kinds
+            .push(test_atlas_kind_diagnostic("polychrome", polychrome_count));
+        snapshot
+    }
+}
+
+fn test_atlas_kind_diagnostic(kind: &str, live_key_count: u64) -> AtlasKindDiagnostic {
+    AtlasKindDiagnostic {
+        kind: kind.to_string(),
+        texture_count: live_key_count as usize,
+        free_texture_slots: 0,
+        live_key_count,
+        gpu_texture_bytes_estimate: 0,
+        cpu_mirror_bytes: 0,
+        dirty_texture_count: 0,
+        dirty_bytes_estimate: 0,
+        upload_calls: 0,
+        upload_bytes: 0,
+        flush_calls: 0,
+        flush_bytes: 0,
+    }
+}
+
+fn tile_bytes_estimate(tile: &AtlasTile) -> u64 {
+    (tile.bounds.size.width.0.max(0) as u64)
+        .saturating_mul(tile.bounds.size.height.0.max(0) as u64)
+        .saturating_mul(4)
 }

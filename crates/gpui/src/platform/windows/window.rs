@@ -849,6 +849,10 @@ impl PlatformWindow for WindowsWindow {
         self.0.state.borrow().renderer.sprite_atlas()
     }
 
+    fn renderer_diagnostic_snapshot(&self) -> PlatformRendererDiagnosticSnapshot {
+        self.0.state.borrow().renderer.diagnostic_snapshot()
+    }
+
     fn get_raw_handle(&self) -> HWND {
         self.0.hwnd
     }

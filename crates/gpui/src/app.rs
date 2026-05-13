@@ -34,15 +34,18 @@ use util::{ResultExt, debug_panic};
 
 #[cfg(any(feature = "inspector", debug_assertions))]
 use crate::InspectorElementRegistry;
+use crate::elements::{completed_decoded_image_asset, decoded_image_asset_diagnostic};
 use crate::{
     Action, ActionBuildError, ActionRegistry, Any, AnyView, AnyWindowHandle, AppContext, Asset,
-    AssetSource, BackgroundExecutor, Bounds, ClipboardItem, CursorStyle, DispatchPhase, DisplayId,
-    EventEmitter, FocusHandle, FocusMap, ForegroundExecutor, Global, KeyBinding, KeyContext,
-    Keymap, Keystroke, LayoutId, Menu, MenuItem, OwnedMenu, PathPromptOptions, Pixels, Platform,
-    PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper, Point, PromptBuilder,
-    PromptButton, PromptHandle, PromptLevel, Render, RenderImage, RenderablePromptHandle,
-    Reservation, ScreenCaptureSource, SharedString, SubscriberSet, Subscription, SvgRenderer, Task,
-    TextSystem, Window, WindowAppearance, WindowHandle, WindowId, WindowInvalidator,
+    AssetSource, BackgroundExecutor, Bounds, ClipboardItem, CursorStyle,
+    DecodedImageAssetDiagnosticSnapshot, DispatchPhase, DisplayId, EventEmitter, FocusHandle,
+    FocusMap, ForegroundExecutor, Global, KeyBinding, KeyContext, Keymap, Keystroke, LayoutId,
+    Menu, MenuItem, OwnedMenu, PathPromptOptions, Pixels, Platform, PlatformDisplay,
+    PlatformKeyboardLayout, PlatformKeyboardMapper, Point, PromptBuilder, PromptButton,
+    PromptHandle, PromptLevel, Render, RenderImage, RenderablePromptHandle,
+    RendererDiagnosticSnapshot, Reservation, ScreenCaptureSource, SharedString, SubscriberSet,
+    Subscription, SvgRenderer, Task, TextSystem, Window, WindowAppearance, WindowHandle, WindowId,
+    WindowInvalidator,
     colors::{Colors, GlobalColors},
     current_platform, hash, init_app_menus,
 };
@@ -556,6 +559,8 @@ pub struct App {
     pub(crate) background_executor: BackgroundExecutor,
     pub(crate) foreground_executor: ForegroundExecutor,
     pub(crate) loading_assets: FxHashMap<(TypeId, u64), Box<dyn Any>>,
+    decoded_image_asset_removed_count: u64,
+    decoded_image_asset_removed_completed_count: u64,
     asset_source: Arc<dyn AssetSource>,
     pub(crate) svg_renderer: SvgRenderer,
     #[cfg(feature = "http-client")]
@@ -603,6 +608,49 @@ pub struct App {
 }
 
 impl App {
+    /// Returns a bounded, metadata-only renderer diagnostic snapshot.
+    pub fn renderer_diagnostic_snapshot(&self) -> RendererDiagnosticSnapshot {
+        const MAX_RENDERER_DIAGNOSTIC_WINDOWS: usize = 16;
+
+        let window_count = self.windows.values().flatten().count();
+        let mut windows = Vec::with_capacity(window_count.min(MAX_RENDERER_DIAGNOSTIC_WINDOWS));
+        for (window_id, window) in self.windows.iter() {
+            if windows.len() >= MAX_RENDERER_DIAGNOSTIC_WINDOWS {
+                break;
+            }
+            let Some(window) = window.as_ref() else {
+                continue;
+            };
+            windows.push(window.renderer_diagnostic_snapshot_for_id(window_id));
+        }
+        let truncated = window_count > windows.len();
+
+        RendererDiagnosticSnapshot {
+            window_count,
+            windows,
+            truncated,
+            loading_asset_count: self.loading_assets.len(),
+            decoded_image_assets: self.decoded_image_asset_diagnostic_snapshot(),
+        }
+    }
+
+    fn decoded_image_asset_diagnostic_snapshot(&self) -> DecodedImageAssetDiagnosticSnapshot {
+        const MAX_DECODED_IMAGE_ASSET_DIAGNOSTIC_ITEMS: usize = 32;
+
+        let mut snapshot = DecodedImageAssetDiagnosticSnapshot::with_removed_counts(
+            self.decoded_image_asset_removed_count,
+            self.decoded_image_asset_removed_completed_count,
+        );
+        for ((asset_type, asset_key_hash), asset) in &self.loading_assets {
+            if let Some(diagnostic) =
+                decoded_image_asset_diagnostic(*asset_type, *asset_key_hash, asset.as_ref())
+            {
+                snapshot.record(diagnostic, MAX_DECODED_IMAGE_ASSET_DIAGNOSTIC_ITEMS);
+            }
+        }
+        snapshot
+    }
+
     #[allow(clippy::new_ret_no_self)]
     pub(crate) fn new_app(
         platform: Rc<dyn Platform>,
@@ -634,6 +682,8 @@ impl App {
                 foreground_executor,
                 svg_renderer: SvgRenderer::new(asset_source.clone()),
                 loading_assets: Default::default(),
+                decoded_image_asset_removed_count: 0,
+                decoded_image_asset_removed_completed_count: 0,
                 asset_source,
                 #[cfg(feature = "http-client")]
                 http_client,
@@ -2011,7 +2061,24 @@ impl App {
     /// Remove an asset from GPUI's cache
     pub fn remove_asset<A: Asset>(&mut self, source: &A::Source) {
         let asset_id = (TypeId::of::<A>(), hash(source));
-        self.loading_assets.remove(&asset_id);
+        let Some(asset) = self.loading_assets.remove(&asset_id) else {
+            return;
+        };
+        let completed_image = completed_decoded_image_asset(asset_id.0, asset.as_ref());
+        if let Some(diagnostic) =
+            decoded_image_asset_diagnostic(asset_id.0, asset_id.1, asset.as_ref())
+        {
+            self.decoded_image_asset_removed_count =
+                self.decoded_image_asset_removed_count.saturating_add(1);
+            if diagnostic.is_completed() {
+                self.decoded_image_asset_removed_completed_count = self
+                    .decoded_image_asset_removed_completed_count
+                    .saturating_add(1);
+            }
+        }
+        if let Some(image) = completed_image {
+            self.defer(move |cx| cx.drop_image(image, None));
+        }
     }
 
     /// Asynchronously load an asset, if the asset hasn't finished loading this will return None.
@@ -2439,9 +2506,18 @@ impl<'a, T> Drop for GpuiBorrow<'a, T> {
 
 #[cfg(test)]
 mod test {
-    use std::{cell::RefCell, rc::Rc};
+    use std::{any::TypeId, cell::RefCell, future, io::Cursor, rc::Rc, sync::Arc};
 
-    use crate::{AppContext, TestAppContext};
+    use anyhow::anyhow;
+    use futures::FutureExt as _;
+    use image::{Frame, RgbaImage};
+    use smallvec::SmallVec;
+
+    use crate::{
+        AppContext, Context, Image, ImageCacheError, ImageFormat, ImgResourceLoader, IntoElement,
+        Render, RenderImage, Resource, Task, TestAppContext, Window,
+        elements::completed_decoded_image_asset, hash, img, point, px, size,
+    };
 
     #[test]
     fn test_gpui_borrow() {
@@ -2472,5 +2548,166 @@ mod test {
         });
 
         assert_eq!(*observation_count.borrow(), 2);
+    }
+
+    #[test]
+    fn renderer_diagnostics_track_decoded_image_asset_lifecycle() {
+        let cx = TestAppContext::single();
+
+        cx.update(|cx| {
+            let baseline = cx.renderer_diagnostic_snapshot().decoded_image_assets;
+            assert_eq!(baseline.asset_count, 0);
+            assert_eq!(baseline.removed_count, 0);
+
+            let completed_resource = Resource::Embedded("completed-image".into());
+            let completed_key = (TypeId::of::<ImgResourceLoader>(), hash(&completed_resource));
+            let image = Arc::new(RenderImage::new(SmallVec::from_elem(
+                Frame::new(RgbaImage::from_raw(2, 3, vec![0; 24]).unwrap()),
+                1,
+            )));
+            let completed_task =
+                Task::ready(Ok::<Arc<RenderImage>, ImageCacheError>(image)).shared();
+            assert!(completed_task.clone().now_or_never().is_some());
+            cx.loading_assets
+                .insert(completed_key, Box::new(completed_task));
+
+            let pending_resource = Resource::Embedded("pending-image".into());
+            let pending_key = (TypeId::of::<ImgResourceLoader>(), hash(&pending_resource));
+            let pending_task = cx
+                .background_executor()
+                .spawn(future::pending::<Result<Arc<RenderImage>, ImageCacheError>>())
+                .shared();
+            cx.loading_assets
+                .insert(pending_key, Box::new(pending_task));
+
+            let failed_resource = Resource::Embedded("failed-image".into());
+            let failed_key = (TypeId::of::<ImgResourceLoader>(), hash(&failed_resource));
+            let failed_task = Task::ready(Err::<Arc<RenderImage>, ImageCacheError>(
+                ImageCacheError::Other(Arc::new(anyhow!("failed image"))),
+            ))
+            .shared();
+            assert!(failed_task.clone().now_or_never().is_some());
+            cx.loading_assets.insert(failed_key, Box::new(failed_task));
+
+            let snapshot = cx.renderer_diagnostic_snapshot().decoded_image_assets;
+            assert_eq!(snapshot.asset_count, 3);
+            assert_eq!(snapshot.completed_count, 1);
+            assert_eq!(snapshot.loading_count, 1);
+            assert_eq!(snapshot.failed_count, 1);
+            assert_eq!(snapshot.decoded_bytes_estimate, 24);
+            assert_eq!(snapshot.frame_count, 1);
+            assert_eq!(snapshot.items.len(), 3);
+            assert!(
+                snapshot
+                    .items
+                    .iter()
+                    .any(|item| item.asset_key_hash == completed_key.1
+                        && item.state == "completed"
+                        && item.decoded_bytes_estimate == Some(24))
+            );
+            assert!(
+                snapshot
+                    .items
+                    .iter()
+                    .any(|item| item.asset_key_hash == pending_key.1 && item.state == "loading")
+            );
+            assert!(
+                snapshot
+                    .items
+                    .iter()
+                    .any(|item| item.asset_key_hash == failed_key.1 && item.state == "failed")
+            );
+
+            cx.remove_asset::<ImgResourceLoader>(&completed_resource);
+            cx.remove_asset::<ImgResourceLoader>(&pending_resource);
+            cx.remove_asset::<ImgResourceLoader>(&failed_resource);
+            cx.remove_asset::<ImgResourceLoader>(&Resource::Embedded("never-loaded-image".into()));
+            cx.remove_asset::<ImgResourceLoader>(&completed_resource);
+            let after_remove = cx.renderer_diagnostic_snapshot().decoded_image_assets;
+            assert_eq!(after_remove.asset_count, 0);
+            assert_eq!(after_remove.removed_count, 3);
+            assert_eq!(after_remove.removed_completed_count, 1);
+        });
+    }
+
+    #[test]
+    fn removing_completed_image_asset_drops_rendered_image_atlas_entries() {
+        let mut test_cx = TestAppContext::single();
+        let image = Arc::new(Image::from_bytes(ImageFormat::Png, test_png_bytes()));
+        let (_view, cx) = test_cx.add_window_view(|_, _| ImageView {
+            image: image.clone(),
+        });
+        cx.run_until_parked();
+        let render_image = cx
+            .cx
+            .update(|cx| {
+                cx.loading_assets
+                    .iter()
+                    .find_map(|((asset_type, _), asset)| {
+                        completed_decoded_image_asset(*asset_type, asset.as_ref())
+                    })
+            })
+            .expect("image should decode");
+        cx.draw(point(px(0.), px(0.)), size(px(20.), px(20.)), |_, _| {
+            img(render_image.clone())
+        });
+
+        let before_remove = cx.cx.update(|cx| cx.renderer_diagnostic_snapshot());
+        assert_eq!(before_remove.decoded_image_assets.asset_count, 1);
+        assert_eq!(before_remove.decoded_image_assets.completed_count, 1);
+        assert_eq!(
+            before_remove.decoded_image_assets.decoded_bytes_estimate,
+            render_image.decoded_byte_len_estimate()
+        );
+        let render_image_id = before_remove
+            .decoded_image_assets
+            .items
+            .iter()
+            .find_map(|item| item.render_image_id)
+            .expect("completed image diagnostic should include render image id");
+        let before_atlas = &before_remove.windows[0].renderer.atlas;
+        assert_eq!(before_atlas.image_tiles, 1);
+        assert!(
+            before_atlas
+                .image_tile_items
+                .iter()
+                .any(|item| item.render_image_id == render_image_id)
+        );
+
+        cx.cx.update(|cx| image.clone().remove_asset(cx));
+
+        let after_remove = cx.cx.update(|cx| cx.renderer_diagnostic_snapshot());
+        assert_eq!(after_remove.decoded_image_assets.asset_count, 0);
+        assert_eq!(after_remove.decoded_image_assets.completed_count, 0);
+        assert_eq!(after_remove.decoded_image_assets.decoded_bytes_estimate, 0);
+        assert_eq!(after_remove.decoded_image_assets.removed_count, 1);
+        assert_eq!(after_remove.decoded_image_assets.removed_completed_count, 1);
+        assert_eq!(after_remove.windows[0].renderer.atlas.image_tiles, 0);
+
+        cx.cx.update(|cx| image.remove_asset(cx));
+        let after_second_remove = cx.cx.update(|cx| cx.renderer_diagnostic_snapshot());
+        assert_eq!(after_second_remove.decoded_image_assets.removed_count, 1);
+        assert_eq!(after_second_remove.windows[0].renderer.atlas.image_tiles, 0);
+    }
+
+    fn test_png_bytes() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        let image = image::DynamicImage::ImageRgba8(
+            RgbaImage::from_raw(2, 3, vec![127; 2 * 3 * 4]).unwrap(),
+        );
+        image
+            .write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Png)
+            .unwrap();
+        bytes
+    }
+
+    struct ImageView {
+        image: Arc<Image>,
+    }
+
+    impl Render for ImageView {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            img(self.image.clone())
+        }
     }
 }

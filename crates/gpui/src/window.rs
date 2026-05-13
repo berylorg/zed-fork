@@ -15,8 +15,9 @@ use crate::{
     SharedString, Size, StrikethroughStyle, Style, SubscriberSet, Subscription, SystemWindowTab,
     SystemWindowTabController, TabStopMap, TaffyLayoutEngine, Task, TextStyle, TextStyleRefinement,
     TransformationMatrix, Underline, UnderlineStyle, WindowAppearance, WindowBackgroundAppearance,
-    WindowBounds, WindowControls, WindowDecorations, WindowOptions, WindowParams, WindowTextSystem,
-    point, prelude::*, px, rems, size, transparent_black,
+    WindowBounds, WindowControls, WindowDecorations, WindowOptions, WindowParams,
+    WindowRendererDiagnosticSnapshot, WindowTextSystem, point, prelude::*, px, rems, size,
+    transparent_black,
 };
 use anyhow::{Context as _, Result, anyhow};
 use collections::{FxHashMap, FxHashSet};
@@ -874,6 +875,63 @@ pub struct Window {
     pub(crate) client_inset: Option<Pixels>,
     #[cfg(any(feature = "inspector", debug_assertions))]
     inspector: Option<Entity<Inspector>>,
+}
+
+impl Window {
+    /// Returns a bounded, metadata-only renderer diagnostic snapshot for this window.
+    pub fn renderer_diagnostic_snapshot(&self) -> WindowRendererDiagnosticSnapshot {
+        self.renderer_diagnostic_snapshot_for_id(self.handle.window_id())
+    }
+
+    pub(crate) fn renderer_diagnostic_snapshot_for_id(
+        &self,
+        window_id: WindowId,
+    ) -> WindowRendererDiagnosticSnapshot {
+        let device_size = self.viewport_size.to_device_pixels(self.scale_factor);
+        let device_width = device_size.width.0.max(0) as u32;
+        let device_height = device_size.height.0.max(0) as u32;
+        let logical_width = self.viewport_size.width.0 as f64;
+        let logical_height = self.viewport_size.height.0 as f64;
+        let renderer = self.platform_window.renderer_diagnostic_snapshot();
+        let surface_unusable_reason = renderer_surface_unusable_reason(
+            logical_width,
+            logical_height,
+            device_width,
+            device_height,
+            &renderer,
+        );
+        WindowRendererDiagnosticSnapshot {
+            window_id: window_id.as_u64(),
+            active: self.platform_window.is_active(),
+            logical_width,
+            logical_height,
+            device_width,
+            device_height,
+            scale_factor: self.scale_factor,
+            surface_usable: surface_unusable_reason.is_none(),
+            surface_unusable_reason,
+            renderer,
+        }
+    }
+}
+
+fn renderer_surface_unusable_reason(
+    logical_width: f64,
+    logical_height: f64,
+    device_width: u32,
+    device_height: u32,
+    renderer: &crate::PlatformRendererDiagnosticSnapshot,
+) -> Option<String> {
+    if logical_width <= 0.0 || logical_height <= 0.0 {
+        return Some("zero_logical_size".to_string());
+    }
+    if device_width == 0 || device_height == 0 {
+        return Some("zero_device_size".to_string());
+    }
+    renderer
+        .unavailable_reason
+        .as_ref()
+        .map(|reason| format!("renderer_unavailable: {reason}"))
 }
 
 #[derive(Clone, Debug, Default)]

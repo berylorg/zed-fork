@@ -457,6 +457,303 @@ pub(crate) struct RequestFrameOptions {
     pub(crate) force_render: bool,
 }
 
+/// A bounded, metadata-only renderer diagnostic snapshot for the application.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RendererDiagnosticSnapshot {
+    /// The number of live windows known to the application.
+    pub window_count: usize,
+    /// Bounded per-window renderer snapshots.
+    pub windows: Vec<WindowRendererDiagnosticSnapshot>,
+    /// Whether the per-window list was truncated.
+    pub truncated: bool,
+    /// The number of app-level asset-loading tasks retained by GPUI.
+    pub loading_asset_count: usize,
+    /// Metadata-only counters for decoded image assets retained by GPUI.
+    pub decoded_image_assets: DecodedImageAssetDiagnosticSnapshot,
+}
+
+/// A bounded, metadata-only renderer diagnostic snapshot for one window.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowRendererDiagnosticSnapshot {
+    /// The GPUI window id.
+    pub window_id: u64,
+    /// Whether the platform reports this window as active.
+    pub active: bool,
+    /// The viewport width in logical pixels.
+    pub logical_width: f64,
+    /// The viewport height in logical pixels.
+    pub logical_height: f64,
+    /// The viewport width in device pixels.
+    pub device_width: u32,
+    /// The viewport height in device pixels.
+    pub device_height: u32,
+    /// The platform scale factor used for the window.
+    pub scale_factor: f32,
+    /// Whether this window surface is usable for renderer attribution.
+    pub surface_usable: bool,
+    /// Why this window surface is not usable for renderer attribution.
+    pub surface_unusable_reason: Option<String>,
+    /// Platform renderer resource counters and byte estimates.
+    pub renderer: PlatformRendererDiagnosticSnapshot,
+}
+
+/// A bounded, metadata-only snapshot of decoded image assets retained by GPUI.
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DecodedImageAssetDiagnosticSnapshot {
+    /// The number of retained image asset tasks recognized by diagnostics.
+    pub asset_count: usize,
+    /// The number of retained image asset tasks that are still loading.
+    pub loading_count: usize,
+    /// The number of retained image asset tasks that completed with decoded image data.
+    pub completed_count: usize,
+    /// The number of retained image asset tasks that completed with an error.
+    pub failed_count: usize,
+    /// Estimated decoded CPU bytes retained by completed image assets.
+    pub decoded_bytes_estimate: u64,
+    /// Total decoded frame count retained by completed image assets.
+    pub frame_count: usize,
+    /// The number of recognized image asset tasks removed through GPUI's asset API.
+    pub removed_count: u64,
+    /// The number of removed image asset tasks that had completed decoded image data.
+    pub removed_completed_count: u64,
+    /// Bounded per-asset metadata for retained image assets.
+    pub items: Vec<DecodedImageAssetDiagnostic>,
+    /// Whether the per-asset metadata list was truncated.
+    pub truncated: bool,
+}
+
+impl DecodedImageAssetDiagnosticSnapshot {
+    pub(crate) fn with_removed_counts(removed_count: u64, removed_completed_count: u64) -> Self {
+        Self {
+            removed_count,
+            removed_completed_count,
+            ..Default::default()
+        }
+    }
+
+    pub(crate) fn record(&mut self, diagnostic: DecodedImageAssetDiagnostic, max_items: usize) {
+        self.asset_count = self.asset_count.saturating_add(1);
+        match diagnostic.state.as_str() {
+            "loading" => self.loading_count = self.loading_count.saturating_add(1),
+            "completed" => {
+                self.completed_count = self.completed_count.saturating_add(1);
+                self.decoded_bytes_estimate = self
+                    .decoded_bytes_estimate
+                    .saturating_add(diagnostic.decoded_bytes_estimate.unwrap_or_default());
+                self.frame_count = self
+                    .frame_count
+                    .saturating_add(diagnostic.frame_count.unwrap_or_default());
+            }
+            "failed" => self.failed_count = self.failed_count.saturating_add(1),
+            _ => {}
+        }
+        if self.items.len() < max_items {
+            self.items.push(diagnostic);
+        } else {
+            self.truncated = true;
+        }
+    }
+}
+
+/// Metadata-only diagnostic information for one decoded image asset task.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DecodedImageAssetDiagnostic {
+    /// The GPUI image asset source category.
+    pub asset_kind: String,
+    /// The GPUI asset-cache key hash for the image source.
+    pub asset_key_hash: u64,
+    /// The retained task state.
+    pub state: String,
+    /// The decoded render image id, when the task completed with image data.
+    pub render_image_id: Option<usize>,
+    /// The decoded frame count, when the task completed with image data.
+    pub frame_count: Option<usize>,
+    /// The first frame width in device pixels, when available.
+    pub first_frame_width: Option<u32>,
+    /// The first frame height in device pixels, when available.
+    pub first_frame_height: Option<u32>,
+    /// Estimated decoded CPU bytes retained by this asset.
+    pub decoded_bytes_estimate: Option<u64>,
+}
+
+impl DecodedImageAssetDiagnostic {
+    pub(crate) fn loading(asset_kind: impl Into<String>, asset_key_hash: u64) -> Self {
+        Self {
+            asset_kind: asset_kind.into(),
+            asset_key_hash,
+            state: "loading".to_string(),
+            render_image_id: None,
+            frame_count: None,
+            first_frame_width: None,
+            first_frame_height: None,
+            decoded_bytes_estimate: None,
+        }
+    }
+
+    pub(crate) fn failed(asset_kind: impl Into<String>, asset_key_hash: u64) -> Self {
+        Self {
+            state: "failed".to_string(),
+            ..Self::loading(asset_kind, asset_key_hash)
+        }
+    }
+
+    pub(crate) fn completed(
+        asset_kind: impl Into<String>,
+        asset_key_hash: u64,
+        image: &RenderImage,
+    ) -> Self {
+        let first_frame_size = image.frame_size(0);
+        Self {
+            asset_kind: asset_kind.into(),
+            asset_key_hash,
+            state: "completed".to_string(),
+            render_image_id: Some(image.id().0),
+            frame_count: Some(image.frame_count()),
+            first_frame_width: first_frame_size.map(|size| size.width.0.max(0) as u32),
+            first_frame_height: first_frame_size.map(|size| size.height.0.max(0) as u32),
+            decoded_bytes_estimate: Some(image.decoded_byte_len_estimate()),
+        }
+    }
+
+    pub(crate) fn is_completed(&self) -> bool {
+        self.state == "completed"
+    }
+}
+
+/// A bounded, metadata-only platform renderer diagnostic snapshot.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlatformRendererDiagnosticSnapshot {
+    /// The platform renderer backend name.
+    pub backend: String,
+    /// Fixed or window-sized renderer resource estimates.
+    pub resources: Vec<RendererResourceDiagnostic>,
+    /// Sprite atlas counters and byte estimates.
+    pub atlas: AtlasDiagnosticSnapshot,
+    /// Structured-buffer high-water capacities for renderer pipelines.
+    pub pipeline_buffers: Vec<PipelineBufferDiagnostic>,
+    /// Why detailed renderer data is unavailable, when the backend cannot report it.
+    pub unavailable_reason: Option<String>,
+}
+
+impl PlatformRendererDiagnosticSnapshot {
+    pub(crate) fn unsupported(reason: impl Into<String>) -> Self {
+        Self {
+            backend: "unsupported".to_string(),
+            resources: Vec::new(),
+            atlas: AtlasDiagnosticSnapshot::default(),
+            pipeline_buffers: Vec::new(),
+            unavailable_reason: Some(reason.into()),
+        }
+    }
+}
+
+/// A bounded renderer resource byte estimate.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RendererResourceDiagnostic {
+    /// The resource label.
+    pub name: String,
+    /// The resource width in device pixels.
+    pub width: u32,
+    /// The resource height in device pixels.
+    pub height: u32,
+    /// The bytes per pixel used for the estimate.
+    pub bytes_per_pixel: u32,
+    /// The sample count used for the estimate.
+    pub sample_count: u32,
+    /// The buffer count used for the estimate.
+    pub buffer_count: u32,
+    /// The estimated bytes represented by this resource.
+    pub estimated_bytes: u64,
+}
+
+/// A bounded renderer pipeline buffer capacity estimate.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineBufferDiagnostic {
+    /// The pipeline label.
+    pub name: String,
+    /// The retained item capacity of the structured buffer.
+    pub item_capacity: usize,
+    /// The byte size of one buffer item.
+    pub item_size_bytes: usize,
+    /// The estimated retained buffer bytes.
+    pub estimated_bytes: u64,
+}
+
+/// A bounded sprite-atlas diagnostic snapshot.
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AtlasDiagnosticSnapshot {
+    /// The total number of atlas tiles keyed by GPUI.
+    pub tile_count: usize,
+    /// The number of glyph atlas tiles.
+    pub glyph_tiles: usize,
+    /// The number of SVG atlas tiles.
+    pub svg_tiles: usize,
+    /// The number of image atlas tiles.
+    pub image_tiles: usize,
+    /// The estimated bytes occupied by image tiles inside atlas pages.
+    pub image_tile_bytes_estimate: u64,
+    /// Bounded per-image atlas tile metadata.
+    pub image_tile_items: Vec<AtlasImageTileDiagnostic>,
+    /// Whether the per-image atlas tile metadata list was truncated.
+    pub image_tile_items_truncated: bool,
+    /// Per-kind atlas page counters.
+    pub kinds: Vec<AtlasKindDiagnostic>,
+}
+
+/// Metadata-only diagnostic information for one uploaded image atlas tile.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AtlasImageTileDiagnostic {
+    /// The decoded render image id for this tile.
+    pub render_image_id: usize,
+    /// The decoded frame index for this tile.
+    pub frame_index: usize,
+    /// The tile width in device pixels.
+    pub width: u32,
+    /// The tile height in device pixels.
+    pub height: u32,
+    /// Estimated bytes occupied by this tile inside the atlas page.
+    pub tile_bytes_estimate: u64,
+}
+
+/// A bounded sprite-atlas diagnostic snapshot for one atlas texture kind.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AtlasKindDiagnostic {
+    /// The atlas texture kind label.
+    pub kind: String,
+    /// The number of live texture pages.
+    pub texture_count: usize,
+    /// The number of reusable empty texture slots.
+    pub free_texture_slots: usize,
+    /// The number of live atlas keys across texture pages.
+    pub live_key_count: u64,
+    /// The estimated GPU texture bytes for this kind.
+    pub gpu_texture_bytes_estimate: u64,
+    /// The CPU mirror bytes retained for this kind.
+    pub cpu_mirror_bytes: u64,
+    /// The number of texture pages with pending dirty regions.
+    pub dirty_texture_count: usize,
+    /// The estimated bytes in pending dirty regions.
+    pub dirty_bytes_estimate: u64,
+    /// The number of atlas upload requests accepted by GPUI.
+    pub upload_calls: u64,
+    /// The estimated bytes copied into atlas CPU mirrors.
+    pub upload_bytes: u64,
+    /// The number of atlas flushes submitted to Direct3D.
+    pub flush_calls: u64,
+    /// The estimated bytes submitted by atlas flushes.
+    pub flush_bytes: u64,
+}
+
 pub(crate) trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn bounds(&self) -> Bounds<Pixels>;
     fn is_maximized(&self) -> bool;
@@ -500,6 +797,9 @@ pub(crate) trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn draw(&self, scene: &Scene);
     fn completed_frame(&self) {}
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas>;
+    fn renderer_diagnostic_snapshot(&self) -> PlatformRendererDiagnosticSnapshot {
+        PlatformRendererDiagnosticSnapshot::unsupported("renderer diagnostics are unavailable")
+    }
 
     // macOS specific methods
     fn get_title(&self) -> String {
@@ -766,6 +1066,9 @@ pub(crate) trait PlatformAtlas: Send + Sync {
         build: &mut dyn FnMut() -> Result<Option<(Size<DevicePixels>, Cow<'a, [u8]>)>>,
     ) -> Result<Option<AtlasTile>>;
     fn remove(&self, key: &AtlasKey);
+    fn diagnostic_snapshot(&self) -> AtlasDiagnosticSnapshot {
+        AtlasDiagnosticSnapshot::default()
+    }
 }
 
 struct AtlasTextureList<T> {

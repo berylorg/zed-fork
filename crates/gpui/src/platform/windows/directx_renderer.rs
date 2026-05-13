@@ -171,6 +171,16 @@ impl DirectXRenderer {
         self.atlas.clone()
     }
 
+    pub(crate) fn diagnostic_snapshot(&self) -> PlatformRendererDiagnosticSnapshot {
+        PlatformRendererDiagnosticSnapshot {
+            backend: "windows-directx".to_string(),
+            resources: self.resources.diagnostic_resources(),
+            atlas: self.atlas.diagnostic_snapshot(),
+            pipeline_buffers: self.pipelines.diagnostic_buffers(),
+            unavailable_reason: None,
+        }
+    }
+
     fn pre_draw(&self) -> Result<()> {
         update_buffer(
             &self.devices.device_context,
@@ -721,6 +731,36 @@ impl DirectXResources {
         self.viewport = viewport;
         Ok(())
     }
+
+    fn diagnostic_resources(&self) -> Vec<RendererResourceDiagnostic> {
+        const BGRA_BYTES_PER_PIXEL: u32 = 4;
+        vec![
+            renderer_resource_diagnostic(
+                "swapchain_back_buffers",
+                self.width,
+                self.height,
+                BGRA_BYTES_PER_PIXEL,
+                1,
+                BUFFER_COUNT as u32,
+            ),
+            renderer_resource_diagnostic(
+                "path_intermediate",
+                self.width,
+                self.height,
+                BGRA_BYTES_PER_PIXEL,
+                1,
+                1,
+            ),
+            renderer_resource_diagnostic(
+                "path_intermediate_msaa",
+                self.width,
+                self.height,
+                BGRA_BYTES_PER_PIXEL,
+                PATH_MULTISAMPLE_COUNT,
+                1,
+            ),
+        ]
+    }
 }
 
 impl DirectXRenderPipelines {
@@ -784,6 +824,18 @@ impl DirectXRenderPipelines {
             mono_sprites,
             poly_sprites,
         })
+    }
+
+    fn diagnostic_buffers(&self) -> Vec<PipelineBufferDiagnostic> {
+        vec![
+            self.shadow_pipeline.diagnostic_buffer(),
+            self.quad_pipeline.diagnostic_buffer(),
+            self.path_rasterization_pipeline.diagnostic_buffer(),
+            self.path_sprite_pipeline.diagnostic_buffer(),
+            self.underline_pipeline.diagnostic_buffer(),
+            self.mono_sprites.diagnostic_buffer(),
+            self.poly_sprites.diagnostic_buffer(),
+        ]
     }
 }
 
@@ -899,6 +951,16 @@ impl<T> PipelineState<T> {
             blend_state,
             _marker: std::marker::PhantomData,
         })
+    }
+
+    fn diagnostic_buffer(&self) -> PipelineBufferDiagnostic {
+        let item_size_bytes = std::mem::size_of::<T>();
+        PipelineBufferDiagnostic {
+            name: self.label.to_string(),
+            item_capacity: self.buffer_size,
+            item_size_bytes,
+            estimated_bytes: (self.buffer_size as u64).saturating_mul(item_size_bytes as u64),
+        }
     }
 
     fn update_buffer(
@@ -1384,6 +1446,29 @@ fn report_live_objects(device: &ID3D11Device) -> Result<()> {
         debug_device.ReportLiveDeviceObjects(D3D11_RLDO_DETAIL)?;
     }
     Ok(())
+}
+
+fn renderer_resource_diagnostic(
+    name: &str,
+    width: u32,
+    height: u32,
+    bytes_per_pixel: u32,
+    sample_count: u32,
+    buffer_count: u32,
+) -> RendererResourceDiagnostic {
+    RendererResourceDiagnostic {
+        name: name.to_string(),
+        width,
+        height,
+        bytes_per_pixel,
+        sample_count,
+        buffer_count,
+        estimated_bytes: (width as u64)
+            .saturating_mul(height as u64)
+            .saturating_mul(bytes_per_pixel as u64)
+            .saturating_mul(sample_count as u64)
+            .saturating_mul(buffer_count as u64),
+    }
 }
 
 const BUFFER_COUNT: usize = 3;
