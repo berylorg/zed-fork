@@ -39,6 +39,7 @@ pub(crate) struct FontInfo {
 pub(crate) struct DirectXRenderer {
     hwnd: HWND,
     atlas: Arc<DirectXAtlas>,
+    image_resources: Arc<DirectXImageResources>,
     devices: ManuallyDrop<DirectXRendererDevices>,
     resources: ManuallyDrop<DirectXResources>,
     globals: DirectXGlobalElements,
@@ -136,6 +137,10 @@ impl DirectXRenderer {
         let devices = DirectXRendererDevices::new(directx_devices, disable_direct_composition)
             .context("Creating DirectX devices")?;
         let atlas = Arc::new(DirectXAtlas::new(&devices.device, &devices.device_context));
+        let image_resources = Arc::new(DirectXImageResources::new(
+            &devices.device,
+            &devices.device_context,
+        ));
 
         let resources = DirectXResources::new(&devices, 1, 1, hwnd, disable_direct_composition)
             .context("Creating DirectX resources")?;
@@ -158,6 +163,7 @@ impl DirectXRenderer {
         Ok(DirectXRenderer {
             hwnd,
             atlas,
+            image_resources,
             devices,
             resources,
             globals,
@@ -171,10 +177,15 @@ impl DirectXRenderer {
         self.atlas.clone()
     }
 
+    pub(crate) fn image_resources(&self) -> Arc<dyn PlatformImageResources> {
+        self.image_resources.clone()
+    }
+
     pub(crate) fn diagnostic_snapshot(&self) -> PlatformRendererDiagnosticSnapshot {
         PlatformRendererDiagnosticSnapshot {
             backend: "windows-directx".to_string(),
             resources: self.resources.diagnostic_resources(),
+            image_resources: self.image_resources.diagnostic_snapshot(),
             atlas: self.atlas.diagnostic_snapshot(),
             pipeline_buffers: self.pipelines.diagnostic_buffers(),
             unavailable_reason: None,
@@ -279,6 +290,8 @@ impl DirectXRenderer {
 
         self.atlas
             .handle_device_lost(&devices.device, &devices.device_context);
+        self.image_resources
+            .handle_device_lost(&devices.device, &devices.device_context);
         self.devices = devices;
         self.resources = resources;
         self.globals = globals;
@@ -312,14 +325,19 @@ impl DirectXRenderer {
                     texture_id,
                     sprites,
                 } => self.draw_polychrome_sprites(texture_id, sprites),
+                PrimitiveBatch::ImageSprites {
+                    texture_id,
+                    sprites,
+                } => self.draw_image_sprites(texture_id, sprites),
                 PrimitiveBatch::Surfaces(surfaces) => self.draw_surfaces(surfaces),
-            }.context(format!("scene too large: {} paths, {} shadows, {} quads, {} underlines, {} mono, {} poly, {} surfaces",
+            }.context(format!("scene too large: {} paths, {} shadows, {} quads, {} underlines, {} mono, {} poly, {} images, {} surfaces",
                     scene.paths.len(),
                     scene.shadows.len(),
                     scene.quads.len(),
                     scene.underlines.len(),
                     scene.monochrome_sprites.len(),
                     scene.polychrome_sprites.len(),
+                    scene.image_sprites.len(),
                     scene.surfaces.len(),))?;
         }
         self.present()
@@ -569,6 +587,36 @@ impl DirectXRenderer {
             sprites,
         )?;
         let texture_view = self.atlas.get_texture_view(texture_id);
+        self.pipelines.poly_sprites.draw_with_texture(
+            &self.devices.device_context,
+            &texture_view,
+            &self.resources.viewport,
+            &self.globals.global_params_buffer,
+            &self.globals.sampler,
+            sprites.len() as u32,
+        )
+    }
+
+    fn draw_image_sprites(
+        &mut self,
+        texture_id: ImageResourceId,
+        sprites: &[ImageSprite],
+    ) -> Result<()> {
+        if sprites.is_empty() {
+            return Ok(());
+        }
+        let Some(texture_view) = self.image_resources.texture_view(texture_id) else {
+            return Ok(());
+        };
+        let sprites = sprites
+            .iter()
+            .map(|sprite| sprite.sprite.clone())
+            .collect::<Vec<_>>();
+        self.pipelines.poly_sprites.update_buffer(
+            &self.devices.device,
+            &self.devices.device_context,
+            &sprites,
+        )?;
         self.pipelines.poly_sprites.draw_with_texture(
             &self.devices.device_context,
             &texture_view,

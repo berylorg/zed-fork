@@ -849,6 +849,10 @@ impl PlatformWindow for WindowsWindow {
         self.0.state.borrow().renderer.sprite_atlas()
     }
 
+    fn image_resources(&self) -> Arc<dyn PlatformImageResources> {
+        self.0.state.borrow().renderer.image_resources()
+    }
+
     fn renderer_diagnostic_snapshot(&self) -> PlatformRendererDiagnosticSnapshot {
         self.0.state.borrow().renderer.diagnostic_snapshot()
     }

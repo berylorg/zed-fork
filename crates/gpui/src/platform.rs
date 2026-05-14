@@ -38,10 +38,11 @@ pub(crate) mod scap_screen_capture;
 use crate::{
     Action, AnyWindowHandle, App, AsyncWindowContext, BackgroundExecutor, Bounds,
     DEFAULT_WINDOW_SIZE, DevicePixels, DispatchEventResult, Font, FontId, FontMetrics, FontRun,
-    ForegroundExecutor, GlyphId, GpuSpecs, ImageSource, Keymap, LineLayout, Pixels, PlatformInput,
-    Point, RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams, Scene, ShapedGlyph,
-    ShapedRun, SharedString, Size, SvgRenderer, SvgSize, SystemWindowTab, Task, TaskLabel, Window,
-    WindowControlArea, hash, point, px, size,
+    ForegroundExecutor, GlyphId, GpuSpecs, ImageRenderRequestId, ImageSource, ImageSourceId,
+    Keymap, LineLayout, Pixels, PlatformInput, Point, PreparedImageUpload, RenderGlyphParams,
+    RenderImage, RenderImageParams, RenderSvgParams, Scene, ShapedGlyph, ShapedRun, SharedString,
+    Size, SvgRenderer, SvgSize, SystemWindowTab, Task, TaskLabel, Window, WindowControlArea, hash,
+    point, px, size,
 };
 use anyhow::Result;
 use async_task::Runnable;
@@ -495,6 +496,8 @@ pub struct WindowRendererDiagnosticSnapshot {
     pub surface_usable: bool,
     /// Why this window surface is not usable for renderer attribution.
     pub surface_unusable_reason: Option<String>,
+    /// Window-owned source-backed image request and lifecycle counters.
+    pub source_backed_images: SourceBackedImageDiagnosticSnapshot,
     /// Platform renderer resource counters and byte estimates.
     pub renderer: PlatformRendererDiagnosticSnapshot,
 }
@@ -632,6 +635,8 @@ pub struct PlatformRendererDiagnosticSnapshot {
     pub backend: String,
     /// Fixed or window-sized renderer resource estimates.
     pub resources: Vec<RendererResourceDiagnostic>,
+    /// Standalone image GPU resource counters and byte estimates.
+    pub image_resources: ImageResourceDiagnosticSnapshot,
     /// Sprite atlas counters and byte estimates.
     pub atlas: AtlasDiagnosticSnapshot,
     /// Structured-buffer high-water capacities for renderer pipelines.
@@ -645,6 +650,7 @@ impl PlatformRendererDiagnosticSnapshot {
         Self {
             backend: "unsupported".to_string(),
             resources: Vec::new(),
+            image_resources: ImageResourceDiagnosticSnapshot::default(),
             atlas: AtlasDiagnosticSnapshot::default(),
             pipeline_buffers: Vec::new(),
             unavailable_reason: Some(reason.into()),
@@ -684,6 +690,183 @@ pub struct PipelineBufferDiagnostic {
     pub item_size_bytes: usize,
     /// The estimated retained buffer bytes.
     pub estimated_bytes: u64,
+}
+
+/// Stable identity for a standalone image GPU resource.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct ImageResourceId(u64);
+
+impl ImageResourceId {
+    /// Returns this image resource identity as an opaque integer.
+    pub fn as_u64(self) -> u64 {
+        self.0
+    }
+}
+
+impl From<ImageRenderRequestId> for ImageResourceId {
+    fn from(value: ImageRenderRequestId) -> Self {
+        Self(value.as_u64())
+    }
+}
+
+/// Metadata for one standalone image GPU resource.
+#[derive(Clone, Debug)]
+pub(crate) struct ImageResource {
+    pub(crate) id: ImageResourceId,
+    pub(crate) request_id: ImageRenderRequestId,
+    pub(crate) source_id: ImageSourceId,
+    pub(crate) size: Size<DevicePixels>,
+}
+
+impl ImageResource {
+    pub(crate) fn from_upload(upload: &PreparedImageUpload) -> Self {
+        let request = upload.request();
+        Self {
+            id: request.id().into(),
+            request_id: request.id(),
+            source_id: request.source_id(),
+            size: upload.size(),
+        }
+    }
+
+    pub(crate) fn gpu_bytes_estimate(&self) -> u64 {
+        image_resource_bytes(self.size)
+    }
+}
+
+/// A bounded, metadata-only snapshot of standalone image GPU resources.
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageResourceDiagnosticSnapshot {
+    /// The number of live standalone image GPU resources.
+    pub resource_count: usize,
+    /// Estimated GPU bytes occupied by standalone image resources.
+    pub gpu_bytes_estimate: u64,
+    /// Estimated decoded CPU bytes retained by standalone image resources.
+    pub decoded_cpu_bytes_estimate: u64,
+    /// The number of uploads accepted by the standalone image resource store.
+    pub upload_count: u64,
+    /// Estimated bytes copied from temporary upload buffers.
+    pub upload_bytes: u64,
+    /// Bounded per-resource metadata.
+    pub items: Vec<ImageResourceDiagnostic>,
+    /// Whether the per-resource metadata list was truncated.
+    pub truncated: bool,
+}
+
+/// Metadata-only diagnostic information for one standalone image GPU resource.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageResourceDiagnostic {
+    /// The standalone image resource id.
+    pub resource_id: u64,
+    /// The render request id that produced this resource.
+    pub request_id: u64,
+    /// The image source id that produced this resource.
+    pub source_id: u64,
+    /// The texture width in device pixels.
+    pub width: u32,
+    /// The texture height in device pixels.
+    pub height: u32,
+    /// Estimated GPU bytes for this resource.
+    pub gpu_bytes_estimate: u64,
+}
+
+impl ImageResourceDiagnostic {
+    pub(crate) fn new(resource: &ImageResource) -> Self {
+        Self {
+            resource_id: resource.id.as_u64(),
+            request_id: resource.request_id.as_u64(),
+            source_id: resource.source_id.as_u64(),
+            width: resource.size.width.0.max(0) as u32,
+            height: resource.size.height.0.max(0) as u32,
+            gpu_bytes_estimate: resource.gpu_bytes_estimate(),
+        }
+    }
+}
+
+/// A bounded, metadata-only snapshot of window-owned source-backed image requests.
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceBackedImageDiagnosticSnapshot {
+    /// The number of tracked source-backed image render requests.
+    pub request_count: usize,
+    /// Requests waiting for file read, decode, downsample, or preparation to finish.
+    pub pending_decode_count: usize,
+    /// Requests with temporary decoded pixels waiting for GPU upload.
+    pub pending_upload_count: usize,
+    /// Requests currently backed by a standalone image resource.
+    pub live_count: usize,
+    /// Requests deferred because the source-backed image budget would be exceeded.
+    pub budget_deferred_count: usize,
+    /// Requests whose latest preparation attempt failed.
+    pub failed_count: usize,
+    /// The number of source identities with remembered natural/prepared size metadata.
+    pub known_source_count: usize,
+    /// The number of source identities marked failed.
+    pub failed_source_count: usize,
+    /// The number of requests observed during the current frame.
+    pub requested_this_frame_count: usize,
+    /// The number of standalone image resources referenced by the current frame's scene.
+    pub painted_resource_count: usize,
+    /// The number of standalone image resources referenced by the current frame's scene.
+    pub final_scene_resource_count: usize,
+    /// The number of preload requests observed during the current frame.
+    pub preload_request_count: usize,
+    /// Preload requests waiting for file read, decode, downsample, or preparation to finish.
+    pub preload_pending_decode_count: usize,
+    /// Preload requests with temporary decoded pixels waiting for GPU upload.
+    pub preload_pending_upload_count: usize,
+    /// Live standalone image resources retained only by preload references.
+    pub preload_live_count: usize,
+    /// Preload requests deferred because preload budgets would be exceeded.
+    pub preload_budget_deferred_count: usize,
+    /// Cumulative preload budget deferrals observed by this window.
+    pub preload_budget_deferral_count: u64,
+    /// Estimated GPU bytes represented by live preloaded source-backed requests.
+    pub preload_gpu_bytes_estimate: u64,
+    /// Cumulative number of preloaded image resources scheduled for lifecycle removal.
+    pub preload_evicted_resource_count: u64,
+    /// Maximum live preloaded source-backed image resources admitted by default.
+    pub preload_max_resource_count: usize,
+    /// Maximum GPU bytes admitted for live preloaded source-backed image resources by default.
+    pub preload_max_gpu_bytes: u64,
+    /// Resources queued for removal after the current presentation completes.
+    pub pending_resource_removal_count: usize,
+    /// Estimated decoded CPU bytes retained by pending upload buffers.
+    pub pending_upload_decoded_cpu_bytes_estimate: u64,
+    /// Estimated GPU bytes represented by live source-backed requests known to the window.
+    pub live_gpu_bytes_estimate: u64,
+    /// Cumulative number of image resources scheduled for lifecycle removal by this window.
+    pub evicted_resource_count: u64,
+    /// Bounded per-request metadata.
+    pub items: Vec<SourceBackedImageRequestDiagnostic>,
+    /// Whether the per-request metadata list was truncated.
+    pub truncated: bool,
+}
+
+/// Metadata-only diagnostic information for one source-backed image render request.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceBackedImageRequestDiagnostic {
+    /// The render request id.
+    pub request_id: u64,
+    /// The image source id.
+    pub source_id: u64,
+    /// The request state.
+    pub state: String,
+    /// The requested width in device pixels.
+    pub requested_width: u32,
+    /// The requested height in device pixels.
+    pub requested_height: u32,
+    /// The live image resource id, when present.
+    pub resource_id: Option<u64>,
+    /// Estimated GPU bytes for the live or prepared resource, when known.
+    pub gpu_bytes_estimate: Option<u64>,
+    /// Estimated decoded CPU bytes retained for pending upload, when present.
+    pub decoded_cpu_bytes_estimate: Option<u64>,
+    /// The current retention class for this request.
+    pub retention_kind: String,
 }
 
 /// A bounded sprite-atlas diagnostic snapshot.
@@ -797,6 +980,9 @@ pub(crate) trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn draw(&self, scene: &Scene);
     fn completed_frame(&self) {}
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas>;
+    fn image_resources(&self) -> Arc<dyn PlatformImageResources> {
+        Arc::new(NoopImageResources)
+    }
     fn renderer_diagnostic_snapshot(&self) -> PlatformRendererDiagnosticSnapshot {
         PlatformRendererDiagnosticSnapshot::unsupported("renderer diagnostics are unavailable")
     }
@@ -1069,6 +1255,39 @@ pub(crate) trait PlatformAtlas: Send + Sync {
     fn diagnostic_snapshot(&self) -> AtlasDiagnosticSnapshot {
         AtlasDiagnosticSnapshot::default()
     }
+}
+
+pub(crate) trait PlatformImageResources: Send + Sync {
+    fn upsert(&self, upload: PreparedImageUpload) -> Result<ImageResource>;
+    fn contains(&self, id: ImageResourceId) -> bool;
+    fn remove(&self, id: ImageResourceId);
+    #[allow(dead_code)]
+    fn clear(&self);
+    fn diagnostic_snapshot(&self) -> ImageResourceDiagnosticSnapshot {
+        ImageResourceDiagnosticSnapshot::default()
+    }
+}
+
+struct NoopImageResources;
+
+impl PlatformImageResources for NoopImageResources {
+    fn upsert(&self, _upload: PreparedImageUpload) -> Result<ImageResource> {
+        anyhow::bail!("standalone image resources are unavailable for this platform")
+    }
+
+    fn contains(&self, _id: ImageResourceId) -> bool {
+        false
+    }
+
+    fn remove(&self, _id: ImageResourceId) {}
+
+    fn clear(&self) {}
+}
+
+pub(crate) fn image_resource_bytes(size: Size<DevicePixels>) -> u64 {
+    (size.width.0.max(0) as u64)
+        .saturating_mul(size.height.0.max(0) as u64)
+        .saturating_mul(4)
 }
 
 struct AtlasTextureList<T> {

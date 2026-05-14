@@ -2,22 +2,24 @@
 use crate::Inspector;
 use crate::{
     Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Arena, Asset,
-    AsyncWindowContext, AvailableSpace, Background, BorderStyle, Bounds, BoxShadow, Capslock,
-    Context, Corners, CursorStyle, Decorations, DevicePixels, DispatchActionListener,
-    DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, Entity, EntityId, EventEmitter,
-    FileDropEvent, FontId, Global, GlobalElementId, GlyphId, GpuSpecs, Hsla, InputHandler, IsZero,
-    KeyBinding, KeyContext, KeyDownEvent, KeyEvent, Keystroke, KeystrokeEvent, LayoutId,
-    LineLayoutIndex, Modifiers, ModifiersChangedEvent, MonochromeSprite, MouseButton, MouseEvent,
-    MouseMoveEvent, MouseUpEvent, Path, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput,
+    AsyncWindowContext, AtlasTextureId, AtlasTextureKind, AtlasTile, AvailableSpace, Background,
+    BorderStyle, Bounds, BoxShadow, Capslock, Context, Corners, CursorStyle, Decorations,
+    DevicePixels, DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId, Edges, Effect,
+    Entity, EntityId, EventEmitter, FileDropEvent, FontId, Global, GlobalElementId, GlyphId,
+    GpuSpecs, Hsla, ImageRenderRequest, ImageRenderSource, ImageResource, ImageResourceId,
+    ImageSourceId, ImageSprite, InputHandler, IsZero, KeyBinding, KeyContext, KeyDownEvent,
+    KeyEvent, Keystroke, KeystrokeEvent, LayoutId, LineLayoutIndex, Modifiers,
+    ModifiersChangedEvent, MonochromeSprite, MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent,
+    Path, Pixels, PlatformAtlas, PlatformDisplay, PlatformImageResources, PlatformInput,
     PlatformInputHandler, PlatformWindow, Point, PolychromeSprite, PromptButton, PromptLevel, Quad,
     Render, RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge,
     SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, Shadow,
     SharedString, Size, StrikethroughStyle, Style, SubscriberSet, Subscription, SystemWindowTab,
     SystemWindowTabController, TabStopMap, TaffyLayoutEngine, Task, TextStyle, TextStyleRefinement,
-    TransformationMatrix, Underline, UnderlineStyle, WindowAppearance, WindowBackgroundAppearance,
-    WindowBounds, WindowControls, WindowDecorations, WindowOptions, WindowParams,
-    WindowRendererDiagnosticSnapshot, WindowTextSystem, point, prelude::*, px, rems, size,
-    transparent_black,
+    TileId, TransformationMatrix, Underline, UnderlineStyle, WindowAppearance,
+    WindowBackgroundAppearance, WindowBounds, WindowControls, WindowDecorations, WindowOptions,
+    WindowParams, WindowRendererDiagnosticSnapshot, WindowTextSystem, point, prelude::*, px, rems,
+    size, spawn_image_upload_preparation, transparent_black,
 };
 use anyhow::{Context as _, Result, anyhow};
 use collections::{FxHashMap, FxHashSet};
@@ -55,9 +57,13 @@ use util::{ResultExt, measure};
 use uuid::Uuid;
 
 mod prompts;
+mod source_backed_image;
 
 use crate::util::atomic_incr_if_not_zero;
 pub use prompts::*;
+use source_backed_image::{
+    SourceBackedImageBudget, SourceBackedImageStore, SourceBackedPaintCandidate,
+};
 
 pub(crate) const DEFAULT_WINDOW_SIZE: Size<Pixels> = size(px(1536.), px(864.));
 
@@ -824,6 +830,10 @@ pub struct Window {
     pub(crate) platform_window: Box<dyn PlatformWindow>,
     display_id: Option<DisplayId>,
     sprite_atlas: Arc<dyn PlatformAtlas>,
+    image_resources: Arc<dyn PlatformImageResources>,
+    source_backed_images: SourceBackedImageStore,
+    source_backed_image_budget: SourceBackedImageBudget,
+    source_backed_image_preload_budget: SourceBackedImageBudget,
     text_system: Arc<WindowTextSystem>,
     rem_size: Pixels,
     /// The stack of override values for the window's rem size.
@@ -910,6 +920,9 @@ impl Window {
             scale_factor: self.scale_factor,
             surface_usable: surface_unusable_reason.is_none(),
             surface_unusable_reason,
+            source_backed_images: self
+                .source_backed_images
+                .diagnostic_snapshot(self.source_backed_image_preload_budget),
             renderer,
         }
     }
@@ -1037,6 +1050,7 @@ impl Window {
 
         let display_id = platform_window.display().map(|display| display.id());
         let sprite_atlas = platform_window.sprite_atlas();
+        let image_resources = platform_window.image_resources();
         let mouse_position = platform_window.mouse_position();
         let modifiers = platform_window.modifiers();
         let capslock = platform_window.capslock();
@@ -1269,6 +1283,10 @@ impl Window {
             platform_window,
             display_id,
             sprite_atlas,
+            image_resources,
+            source_backed_images: SourceBackedImageStore::default(),
+            source_backed_image_budget: SourceBackedImageBudget::default(),
+            source_backed_image_preload_budget: SourceBackedImageBudget::preload_default(),
             text_system,
             rem_size: px(16.),
             rem_size_override_stack: SmallVec::new(),
@@ -1975,6 +1993,7 @@ impl Window {
         debug_assert!(self.rendered_entity_stack.is_empty());
         self.invalidator.set_dirty(false);
         self.requested_autoscroll = None;
+        self.source_backed_images.begin_frame();
 
         // Restore the previously-used input handler.
         if let Some(input_handler) = self.platform_window.take_input_handler() {
@@ -1998,6 +2017,21 @@ impl Window {
         let previous_focus_path = self.rendered_frame.focus_path();
         let previous_window_active = self.rendered_frame.window_active;
         mem::swap(&mut self.rendered_frame, &mut self.next_frame);
+        let final_scene_image_resources = self
+            .rendered_frame
+            .scene
+            .image_resource_ids()
+            .collect::<SmallVec<[ImageResourceId; 8]>>();
+        self.source_backed_images
+            .sync_final_scene_references(final_scene_image_resources.iter().copied());
+        let removed = self.source_backed_images.service_preloads(
+            self.image_resources.as_ref(),
+            self.source_backed_image_budget,
+            self.source_backed_image_preload_budget,
+        );
+        self.source_backed_images.queue_removals(removed);
+        self.source_backed_images
+            .finish_frame(final_scene_image_resources);
         self.next_frame.clear();
         let current_focus_path = self.rendered_frame.focus_path();
         let current_window_active = self.rendered_frame.window_active;
@@ -2062,8 +2096,11 @@ impl Window {
     }
 
     #[profiling::function]
-    fn present(&self) {
+    fn present(&mut self) {
         self.platform_window.draw(&self.rendered_frame.scene);
+        for resource_id in self.source_backed_images.drain_pending_removals() {
+            self.image_resources.remove(resource_id);
+        }
         self.needs_present.set(false);
         profiling::finish_frame!();
     }
@@ -2380,6 +2417,13 @@ impl Window {
 
         self.text_system
             .reuse_layouts(range.start.line_layout_index..range.end.line_layout_index);
+        let replayed_image_resources = self
+            .rendered_frame
+            .scene
+            .image_resource_ids_in_paint_range(range.start.scene_index..range.end.scene_index)
+            .collect::<SmallVec<[ImageResourceId; 4]>>();
+        self.source_backed_images
+            .mark_referenced_resource_ids(replayed_image_resources);
         self.next_frame.scene.replay(
             range.start.scene_index..range.end.scene_index,
             &self.rendered_frame.scene,
@@ -3177,6 +3221,203 @@ impl Window {
             transformation,
         });
 
+        Ok(())
+    }
+
+    pub(crate) fn source_backed_image_size(
+        &self,
+        source_id: ImageSourceId,
+    ) -> Option<Size<DevicePixels>> {
+        self.source_backed_images
+            .latest_size(source_id, self.image_resources.as_ref())
+    }
+
+    pub(crate) fn source_backed_image_failed(&self, source_id: ImageSourceId) -> bool {
+        self.source_backed_images.has_failed(source_id)
+    }
+
+    pub(crate) fn request_source_backed_image(
+        &mut self,
+        source: ImageRenderSource,
+        request: ImageRenderRequest,
+        cx: &mut App,
+    ) {
+        let source_id = source.id();
+        if !self.source_backed_images.request(
+            source_id,
+            request.id(),
+            request.requested_size(),
+            self.image_resources.as_ref(),
+        ) {
+            return;
+        }
+
+        self.spawn_source_backed_image_preparation(source, request, cx);
+    }
+
+    /// Requests a source-backed image resource for anticipated rendering without
+    /// inserting an image sprite into the current scene.
+    pub fn preload_source_backed_image(
+        &mut self,
+        source: ImageRenderSource,
+        request: ImageRenderRequest,
+        cx: &mut App,
+    ) {
+        let source_id = source.id();
+        if !self.source_backed_images.preload(
+            source_id,
+            request.id(),
+            request.requested_size(),
+            self.image_resources.as_ref(),
+        ) {
+            return;
+        }
+
+        self.spawn_source_backed_image_preparation(source, request, cx);
+    }
+
+    fn spawn_source_backed_image_preparation(
+        &mut self,
+        source: ImageRenderSource,
+        request: ImageRenderRequest,
+        cx: &mut App,
+    ) {
+        let task = spawn_image_upload_preparation(
+            &cx.background_executor(),
+            cx.svg_renderer(),
+            source,
+            request,
+        );
+        self.spawn(cx, async move |cx| {
+            let outcome = task.await;
+            cx.update(|window, _| {
+                let removed = window.source_backed_images.complete(outcome);
+                window.source_backed_images.queue_removals(removed);
+                window.refresh();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub(crate) fn source_backed_image_resource(
+        &mut self,
+        request: ImageRenderRequest,
+    ) -> Result<Option<ImageResource>> {
+        let resource = match self
+            .source_backed_images
+            .candidate(request.id(), self.image_resources.as_ref())
+        {
+            SourceBackedPaintCandidate::Ready { source_id, upload } => {
+                let pending_resource = ImageResource::from_upload(&upload);
+                if !self
+                    .source_backed_images
+                    .can_paint(&pending_resource, self.source_backed_image_budget)
+                {
+                    let removed = self.source_backed_images.mark_budget_deferred(
+                        request.id(),
+                        source_id,
+                        false,
+                    );
+                    self.source_backed_images.queue_removals(removed);
+                    return Ok(None);
+                }
+                let resource = match self.image_resources.upsert(upload) {
+                    Ok(resource) => resource,
+                    Err(error) => {
+                        let removed = self
+                            .source_backed_images
+                            .mark_failed(request.id(), source_id);
+                        self.source_backed_images.queue_removals(removed);
+                        return Err(error);
+                    }
+                };
+                self.source_backed_images
+                    .mark_live(request.id(), source_id, resource.clone());
+                self.source_backed_images.mark_referenced(&resource);
+                resource
+            }
+            SourceBackedPaintCandidate::Live(resource) => {
+                if self
+                    .source_backed_images
+                    .can_paint(&resource, self.source_backed_image_budget)
+                {
+                    self.source_backed_images.mark_referenced(&resource);
+                    resource
+                } else {
+                    let removed = self.source_backed_images.mark_budget_deferred(
+                        request.id(),
+                        resource.source_id,
+                        false,
+                    );
+                    self.source_backed_images.queue_removals(removed);
+                    return Ok(None);
+                }
+            }
+            SourceBackedPaintCandidate::Loading { source_id } => {
+                let Some(resource) = self
+                    .source_backed_images
+                    .latest_resource(source_id, self.image_resources.as_ref())
+                else {
+                    return Ok(None);
+                };
+                if self
+                    .source_backed_images
+                    .can_paint(&resource, self.source_backed_image_budget)
+                {
+                    self.source_backed_images.mark_referenced(&resource);
+                    return Ok(Some(resource));
+                }
+                return Ok(None);
+            }
+            SourceBackedPaintCandidate::None => return Ok(None),
+        };
+
+        Ok(Some(resource))
+    }
+
+    pub(crate) fn paint_image_resource(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+        resource: ImageResource,
+        grayscale: bool,
+    ) -> Result<()> {
+        self.invalidator.debug_assert_paint();
+
+        let scale_factor = self.scale_factor();
+        let bounds = bounds.scale(scale_factor);
+        let content_mask = self.content_mask().scale(scale_factor);
+        let corner_radii = corner_radii.scale(scale_factor);
+        let opacity = self.element_opacity();
+        let tile = AtlasTile {
+            texture_id: AtlasTextureId {
+                index: 0,
+                kind: AtlasTextureKind::Polychrome,
+            },
+            tile_id: TileId(0),
+            padding: 0,
+            bounds: Bounds {
+                origin: Point::default(),
+                size: resource.size,
+            },
+        };
+
+        self.next_frame.scene.insert_primitive(ImageSprite {
+            texture_id: resource.id,
+            sprite: PolychromeSprite {
+                order: 0,
+                pad: 0,
+                grayscale,
+                bounds: bounds
+                    .map_origin(|origin| origin.floor())
+                    .map_size(|size| size.ceil()),
+                content_mask,
+                corner_radii,
+                tile,
+                opacity,
+            },
+        });
         Ok(())
     }
 
@@ -4679,6 +4920,43 @@ impl Window {
     #[cfg(any(test, feature = "test-support"))]
     pub fn set_modifiers(&mut self, modifiers: Modifiers) {
         self.modifiers = modifiers;
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    /// Sets the standalone source-backed image resource budget for tests.
+    pub fn set_source_backed_image_resource_budget_for_test(
+        &mut self,
+        max_resource_count: usize,
+        max_gpu_bytes: u64,
+    ) {
+        self.source_backed_image_budget =
+            SourceBackedImageBudget::new(max_resource_count, max_gpu_bytes);
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    /// Sets the standalone source-backed image preload budget for tests.
+    pub fn set_source_backed_image_preload_budget_for_test(
+        &mut self,
+        max_resource_count: usize,
+        max_gpu_bytes: u64,
+    ) {
+        self.source_backed_image_preload_budget =
+            SourceBackedImageBudget::new(max_resource_count, max_gpu_bytes);
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    /// Clears standalone source-backed image resources from the test platform renderer.
+    pub fn clear_source_backed_image_resources_for_test(&mut self) {
+        self.image_resources.clear();
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    /// Draws and presents one frame for tests that need full frame lifecycle effects.
+    pub fn draw_and_present_for_test(&mut self, cx: &mut App) {
+        let arena_clear_needed = self.draw(cx);
+        self.present();
+        arena_clear_needed.clear();
+        self.complete_frame();
     }
 }
 

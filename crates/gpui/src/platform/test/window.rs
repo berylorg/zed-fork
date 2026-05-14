@@ -1,10 +1,12 @@
 use crate::{
     AnyWindowHandle, AtlasDiagnosticSnapshot, AtlasImageTileDiagnostic, AtlasKey,
     AtlasKindDiagnostic, AtlasTextureId, AtlasTextureKind, AtlasTile, Bounds, DispatchEventResult,
-    GpuSpecs, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler,
-    PlatformRendererDiagnosticSnapshot, PlatformWindow, Point, PromptButton, RequestFrameOptions,
-    Size, TestPlatform, TileId, WindowAppearance, WindowBackgroundAppearance, WindowBounds,
-    WindowControlArea, WindowParams,
+    GpuSpecs, ImageResource, ImageResourceDiagnostic, ImageResourceDiagnosticSnapshot,
+    ImageResourceId, Pixels, PlatformAtlas, PlatformDisplay, PlatformImageResources, PlatformInput,
+    PlatformInputHandler, PlatformRendererDiagnosticSnapshot, PlatformWindow, Point,
+    PreparedImageUpload, PromptButton, RequestFrameOptions, Size, TestPlatform, TileId,
+    WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowParams,
+    image_resource_bytes,
 };
 use collections::HashMap;
 use parking_lot::Mutex;
@@ -22,6 +24,7 @@ pub(crate) struct TestWindowState {
     pub(crate) edited: bool,
     platform: Weak<TestPlatform>,
     sprite_atlas: Arc<dyn PlatformAtlas>,
+    image_resources: Arc<dyn PlatformImageResources>,
     pub(crate) should_close_handler: Option<Box<dyn FnMut() -> bool>>,
     hit_test_window_control_callback: Option<Box<dyn FnMut() -> Option<WindowControlArea>>>,
     input_callback: Option<Box<dyn FnMut(PlatformInput) -> DispatchEventResult>>,
@@ -65,6 +68,7 @@ impl TestWindow {
             platform,
             handle,
             sprite_atlas: Arc::new(TestAtlas::new()),
+            image_resources: Arc::new(TestImageResources::new()),
             title: Default::default(),
             edited: false,
             should_close_handler: None,
@@ -274,11 +278,17 @@ impl PlatformWindow for TestWindow {
         self.0.lock().sprite_atlas.clone()
     }
 
+    fn image_resources(&self) -> sync::Arc<dyn PlatformImageResources> {
+        self.0.lock().image_resources.clone()
+    }
+
     fn renderer_diagnostic_snapshot(&self) -> PlatformRendererDiagnosticSnapshot {
+        let lock = self.0.lock();
         PlatformRendererDiagnosticSnapshot {
             backend: "test".to_string(),
             resources: Vec::new(),
-            atlas: self.0.lock().sprite_atlas.diagnostic_snapshot(),
+            image_resources: lock.image_resources.diagnostic_snapshot(),
+            atlas: lock.sprite_atlas.diagnostic_snapshot(),
             pipeline_buffers: Vec::new(),
             unavailable_reason: None,
         }
@@ -311,6 +321,76 @@ impl PlatformWindow for TestWindow {
 pub(crate) struct TestAtlasState {
     next_id: u32,
     tiles: HashMap<AtlasKey, AtlasTile>,
+}
+
+pub(crate) struct TestImageResourcesState {
+    resources: HashMap<ImageResourceId, ImageResource>,
+    upload_count: u64,
+    upload_bytes: u64,
+}
+
+pub(crate) struct TestImageResources(Mutex<TestImageResourcesState>);
+
+impl TestImageResources {
+    pub fn new() -> Self {
+        Self(Mutex::new(TestImageResourcesState {
+            resources: HashMap::default(),
+            upload_count: 0,
+            upload_bytes: 0,
+        }))
+    }
+}
+
+impl PlatformImageResources for TestImageResources {
+    fn upsert(&self, upload: PreparedImageUpload) -> anyhow::Result<ImageResource> {
+        let resource = ImageResource::from_upload(&upload);
+        let pixels = upload.into_pixels();
+        let expected_bytes = image_resource_bytes(resource.size) as usize;
+        anyhow::ensure!(
+            pixels.len() == expected_bytes,
+            "prepared upload byte length did not match resource size"
+        );
+
+        let mut state = self.0.lock();
+        state.upload_count = state.upload_count.saturating_add(1);
+        state.upload_bytes = state.upload_bytes.saturating_add(pixels.len() as u64);
+        state.resources.insert(resource.id, resource.clone());
+        Ok(resource)
+    }
+
+    fn contains(&self, id: ImageResourceId) -> bool {
+        self.0.lock().resources.contains_key(&id)
+    }
+
+    fn remove(&self, id: ImageResourceId) {
+        self.0.lock().resources.remove(&id);
+    }
+
+    fn clear(&self) {
+        self.0.lock().resources.clear();
+    }
+
+    fn diagnostic_snapshot(&self) -> ImageResourceDiagnosticSnapshot {
+        self.0.lock().diagnostic_snapshot()
+    }
+}
+
+impl TestImageResourcesState {
+    fn diagnostic_snapshot(&self) -> ImageResourceDiagnosticSnapshot {
+        let mut snapshot = ImageResourceDiagnosticSnapshot {
+            resource_count: self.resources.len(),
+            upload_count: self.upload_count,
+            upload_bytes: self.upload_bytes,
+            ..Default::default()
+        };
+        for resource in self.resources.values() {
+            snapshot.gpu_bytes_estimate = snapshot
+                .gpu_bytes_estimate
+                .saturating_add(resource.gpu_bytes_estimate());
+            snapshot.items.push(ImageResourceDiagnostic::new(resource));
+        }
+        snapshot
+    }
 }
 
 pub(crate) struct TestAtlas(Mutex<TestAtlasState>);

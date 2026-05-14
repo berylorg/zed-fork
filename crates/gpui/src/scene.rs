@@ -5,8 +5,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AtlasTextureId, AtlasTile, Background, Bounds, ContentMask, Corners, Edges, Hsla, Pixels,
-    Point, Radians, ScaledPixels, Size, bounds_tree::BoundsTree, point,
+    AtlasTextureId, AtlasTile, Background, Bounds, ContentMask, Corners, Edges, Hsla,
+    ImageResourceId, Pixels, Point, Radians, ScaledPixels, Size, bounds_tree::BoundsTree, point,
 };
 use std::{
     fmt::Debug,
@@ -31,6 +31,7 @@ pub(crate) struct Scene {
     pub(crate) underlines: Vec<Underline>,
     pub(crate) monochrome_sprites: Vec<MonochromeSprite>,
     pub(crate) polychrome_sprites: Vec<PolychromeSprite>,
+    pub(crate) image_sprites: Vec<ImageSprite>,
     pub(crate) surfaces: Vec<PaintSurface>,
 }
 
@@ -45,6 +46,7 @@ impl Scene {
         self.underlines.clear();
         self.monochrome_sprites.clear();
         self.polychrome_sprites.clear();
+        self.image_sprites.clear();
         self.surfaces.clear();
     }
 
@@ -105,6 +107,10 @@ impl Scene {
                 sprite.order = order;
                 self.polychrome_sprites.push(sprite.clone());
             }
+            Primitive::ImageSprite(sprite) => {
+                sprite.sprite.order = order;
+                self.image_sprites.push(sprite.clone());
+            }
             Primitive::Surface(surface) => {
                 surface.order = order;
                 self.surfaces.push(surface.clone());
@@ -124,6 +130,26 @@ impl Scene {
         }
     }
 
+    pub(crate) fn image_resource_ids(&self) -> impl Iterator<Item = ImageResourceId> + '_ {
+        self.image_sprites.iter().map(|sprite| sprite.texture_id)
+    }
+
+    pub(crate) fn image_resource_ids_in_paint_range(
+        &self,
+        range: Range<usize>,
+    ) -> impl Iterator<Item = ImageResourceId> + '_ {
+        self.paint_operations[range]
+            .iter()
+            .filter_map(|operation| match operation {
+                PaintOperation::Primitive(Primitive::ImageSprite(sprite)) => {
+                    Some(sprite.texture_id)
+                }
+                PaintOperation::Primitive(_)
+                | PaintOperation::StartLayer(_)
+                | PaintOperation::EndLayer => None,
+            })
+    }
+
     pub fn finish(&mut self) {
         self.shadows.sort_by_key(|shadow| shadow.order);
         self.quads.sort_by_key(|quad| quad.order);
@@ -133,6 +159,8 @@ impl Scene {
             .sort_by_key(|sprite| (sprite.order, sprite.tile.tile_id));
         self.polychrome_sprites
             .sort_by_key(|sprite| (sprite.order, sprite.tile.tile_id));
+        self.image_sprites
+            .sort_by_key(|sprite| (sprite.sprite.order, sprite.texture_id.as_u64()));
         self.surfaces.sort_by_key(|surface| surface.order);
     }
 
@@ -163,6 +191,9 @@ impl Scene {
             polychrome_sprites: &self.polychrome_sprites,
             polychrome_sprites_start: 0,
             polychrome_sprites_iter: self.polychrome_sprites.iter().peekable(),
+            image_sprites: &self.image_sprites,
+            image_sprites_start: 0,
+            image_sprites_iter: self.image_sprites.iter().peekable(),
             surfaces: &self.surfaces,
             surfaces_start: 0,
             surfaces_iter: self.surfaces.iter().peekable(),
@@ -186,6 +217,7 @@ pub(crate) enum PrimitiveKind {
     Underline,
     MonochromeSprite,
     PolychromeSprite,
+    ImageSprite,
     Surface,
 }
 
@@ -203,6 +235,7 @@ pub(crate) enum Primitive {
     Underline(Underline),
     MonochromeSprite(MonochromeSprite),
     PolychromeSprite(PolychromeSprite),
+    ImageSprite(ImageSprite),
     Surface(PaintSurface),
 }
 
@@ -215,6 +248,7 @@ impl Primitive {
             Primitive::Underline(underline) => &underline.bounds,
             Primitive::MonochromeSprite(sprite) => &sprite.bounds,
             Primitive::PolychromeSprite(sprite) => &sprite.bounds,
+            Primitive::ImageSprite(sprite) => &sprite.sprite.bounds,
             Primitive::Surface(surface) => &surface.bounds,
         }
     }
@@ -227,6 +261,7 @@ impl Primitive {
             Primitive::Underline(underline) => &underline.content_mask,
             Primitive::MonochromeSprite(sprite) => &sprite.content_mask,
             Primitive::PolychromeSprite(sprite) => &sprite.content_mask,
+            Primitive::ImageSprite(sprite) => &sprite.sprite.content_mask,
             Primitive::Surface(surface) => &surface.content_mask,
         }
     }
@@ -258,6 +293,9 @@ struct BatchIterator<'a> {
     polychrome_sprites: &'a [PolychromeSprite],
     polychrome_sprites_start: usize,
     polychrome_sprites_iter: Peekable<slice::Iter<'a, PolychromeSprite>>,
+    image_sprites: &'a [ImageSprite],
+    image_sprites_start: usize,
+    image_sprites_iter: Peekable<slice::Iter<'a, ImageSprite>>,
     surfaces: &'a [PaintSurface],
     surfaces_start: usize,
     surfaces_iter: Peekable<slice::Iter<'a, PaintSurface>>,
@@ -285,6 +323,10 @@ impl<'a> Iterator for BatchIterator<'a> {
             (
                 self.polychrome_sprites_iter.peek().map(|s| s.order),
                 PrimitiveKind::PolychromeSprite,
+            ),
+            (
+                self.image_sprites_iter.peek().map(|s| s.sprite.order),
+                PrimitiveKind::ImageSprite,
             ),
             (
                 self.surfaces_iter.peek().map(|s| s.order),
@@ -404,6 +446,27 @@ impl<'a> Iterator for BatchIterator<'a> {
                     sprites: &self.polychrome_sprites[sprites_start..sprites_end],
                 })
             }
+            PrimitiveKind::ImageSprite => {
+                let texture_id = self.image_sprites_iter.peek().unwrap().texture_id;
+                let sprites_start = self.image_sprites_start;
+                let mut sprites_end = self.image_sprites_start + 1;
+                self.image_sprites_iter.next();
+                while self
+                    .image_sprites_iter
+                    .next_if(|sprite| {
+                        (sprite.sprite.order, batch_kind) < max_order_and_kind
+                            && sprite.texture_id == texture_id
+                    })
+                    .is_some()
+                {
+                    sprites_end += 1;
+                }
+                self.image_sprites_start = sprites_end;
+                Some(PrimitiveBatch::ImageSprites {
+                    texture_id,
+                    sprites: &self.image_sprites[sprites_start..sprites_end],
+                })
+            }
             PrimitiveKind::Surface => {
                 let surfaces_start = self.surfaces_start;
                 let mut surfaces_end = surfaces_start + 1;
@@ -444,6 +507,10 @@ pub(crate) enum PrimitiveBatch<'a> {
     PolychromeSprites {
         texture_id: AtlasTextureId,
         sprites: &'a [PolychromeSprite],
+    },
+    ImageSprites {
+        texture_id: ImageResourceId,
+        sprites: &'a [ImageSprite],
     },
     Surfaces(&'a [PaintSurface]),
 }
@@ -650,6 +717,18 @@ pub(crate) struct PolychromeSprite {
 impl From<PolychromeSprite> for Primitive {
     fn from(sprite: PolychromeSprite) -> Self {
         Primitive::PolychromeSprite(sprite)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ImageSprite {
+    pub(crate) texture_id: ImageResourceId,
+    pub(crate) sprite: PolychromeSprite,
+}
+
+impl From<ImageSprite> for Primitive {
+    fn from(sprite: ImageSprite) -> Self {
+        Primitive::ImageSprite(sprite)
     }
 }
 
