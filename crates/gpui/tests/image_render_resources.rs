@@ -1,8 +1,9 @@
 #[cfg(feature = "test-support")]
 use gpui::{
     AnyView, AnyWindowHandle, AppContext, Context, DevicePixels, Entity, ImageRenderSource,
-    InteractiveElement, IntoElement, Pixels, Render, RenderImage, Size, StyleRefinement, Styled,
-    TestAppContext, VisualTestContext, Window, div, img, prelude::ParentElement, px, size,
+    InteractiveElement, IntoElement, Pixels, Render, RenderImage, Size,
+    SourceBackedImageRequestStatus, StyleRefinement, Styled, TestAppContext, VisualTestContext,
+    Window, div, img, prelude::ParentElement, px, size,
 };
 #[cfg(feature = "test-support")]
 use image::{DynamicImage, Frame, RgbaImage};
@@ -354,6 +355,29 @@ fn source_backed_preload_uploads_without_scene_sprite() {
         snapshot.windows[0].renderer.image_resources.resource_count,
         1
     );
+}
+
+#[cfg(feature = "test-support")]
+#[gpui::test]
+fn source_backed_preload_status_reports_live_request() {
+    let mut test_cx = TestAppContext::single();
+    let source = ImageRenderSource::bytes(png_bytes(40, 20));
+    let status_source = source.clone();
+    let (_view, cx) =
+        test_cx.add_window_view(move |_, _| PreloadImagesView::preload_only(source.clone()));
+
+    run_until_image_resource_count(cx, 1);
+
+    let status = cx.update(|window, _| {
+        let scale_factor = window.scale_factor();
+        let requested_size = size(
+            DevicePixels((f32::from(px(40.)) * scale_factor).ceil() as i32),
+            DevicePixels((f32::from(px(20.)) * scale_factor).ceil() as i32),
+        );
+        let request = status_source.render_request(0, scale_factor, requested_size);
+        window.source_backed_image_request_status(request)
+    });
+    assert_eq!(status, SourceBackedImageRequestStatus::Live);
 }
 
 #[cfg(feature = "test-support")]

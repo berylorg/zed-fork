@@ -65,6 +65,23 @@ use source_backed_image::{
     SourceBackedImageBudget, SourceBackedImageStore, SourceBackedPaintCandidate,
 };
 
+/// Readiness state for a source-backed image render request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SourceBackedImageRequestStatus {
+    /// No request with this identity is currently tracked by the window.
+    Missing,
+    /// The request is waiting for source read, decode, downsample, or preparation.
+    Loading,
+    /// The request has decoded pixels ready but has not uploaded a renderer resource yet.
+    ReadyForUpload,
+    /// The request has a live renderer resource matching the requested source and size.
+    Live,
+    /// The request could not be admitted because source-backed image budgets were exhausted.
+    BudgetDeferred,
+    /// The latest preparation or renderer-resource admission attempt failed.
+    Failed,
+}
+
 pub(crate) const DEFAULT_WINDOW_SIZE: Size<Pixels> = size(px(1536.), px(864.));
 
 /// Represents the two different phases when dispatching events.
@@ -3274,6 +3291,15 @@ impl Window {
         }
 
         self.spawn_source_backed_image_preparation(source, request, cx);
+    }
+
+    /// Returns the current readiness state for a source-backed image render request.
+    pub fn source_backed_image_request_status(
+        &self,
+        request: ImageRenderRequest,
+    ) -> SourceBackedImageRequestStatus {
+        self.source_backed_images
+            .request_status(request.id(), self.image_resources.as_ref())
     }
 
     fn spawn_source_backed_image_preparation(

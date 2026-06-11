@@ -5,6 +5,8 @@ use crate::{
 };
 use collections::{FxHashMap, FxHashSet};
 
+use super::SourceBackedImageRequestStatus;
+
 const DEFAULT_SOURCE_BACKED_IMAGE_RESOURCE_COUNT_LIMIT: usize = 128;
 const DEFAULT_SOURCE_BACKED_IMAGE_GPU_BYTE_LIMIT: u64 = 256 * 1024 * 1024;
 const DEFAULT_SOURCE_BACKED_IMAGE_PRELOAD_RESOURCE_COUNT_LIMIT: usize = 32;
@@ -137,6 +139,28 @@ impl SourceBackedImageStore {
 
     pub(super) fn has_failed(&self, source_id: ImageSourceId) -> bool {
         self.failed_sources.contains(&source_id)
+    }
+
+    pub(super) fn request_status(
+        &self,
+        request_id: ImageRenderRequestId,
+        image_resources: &dyn PlatformImageResources,
+    ) -> SourceBackedImageRequestStatus {
+        let Some(entry) = self.requests.get(&request_id) else {
+            return SourceBackedImageRequestStatus::Missing;
+        };
+        match &entry.state {
+            SourceBackedImageState::Loading => SourceBackedImageRequestStatus::Loading,
+            SourceBackedImageState::Ready(_) => SourceBackedImageRequestStatus::ReadyForUpload,
+            SourceBackedImageState::Live(resource) if image_resources.contains(resource.id) => {
+                SourceBackedImageRequestStatus::Live
+            }
+            SourceBackedImageState::Live(_) => SourceBackedImageRequestStatus::Loading,
+            SourceBackedImageState::BudgetDeferred { .. } => {
+                SourceBackedImageRequestStatus::BudgetDeferred
+            }
+            SourceBackedImageState::Failed => SourceBackedImageRequestStatus::Failed,
+        }
     }
 
     pub(super) fn request(
