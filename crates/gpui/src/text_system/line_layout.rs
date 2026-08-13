@@ -129,6 +129,7 @@ impl LineLayout {
         &self,
         text: &str,
         wrap_width: Pixels,
+        first_line_inline_offset: Pixels,
         max_lines: Option<usize>,
     ) -> SmallVec<[WrapBoundary; 1]> {
         let mut boundaries = SmallVec::new();
@@ -181,9 +182,18 @@ impl LineLayout {
             }
 
             let next_x = glyphs.peek().map_or(self.width, |(_, _, x)| *x);
-            let width = next_x - last_boundary_x;
+            let width = next_x - last_boundary_x
+                + if boundaries.is_empty() {
+                    first_line_inline_offset
+                } else {
+                    Pixels::ZERO
+                };
 
-            if width > wrap_width && boundary > last_boundary {
+            let can_wrap = boundary > last_boundary
+                || (boundaries.is_empty()
+                    && first_line_inline_offset > Pixels::ZERO
+                    && boundary == last_boundary);
+            if width > wrap_width && can_wrap {
                 // When used line_clamp, we should limit the number of lines.
                 if let Some(max_lines) = max_lines
                     && boundaries.len() >= max_lines - 1
@@ -204,6 +214,29 @@ impl LineLayout {
         }
 
         boundaries
+    }
+
+    pub(crate) fn compute_streaming_wrap_boundaries(
+        &self,
+        text: &str,
+        wrap_width: Pixels,
+        first_line_inline_offset: Pixels,
+        max_lines: Option<usize>,
+    ) -> Result<SmallVec<[WrapBoundary; 1]>, crate::StreamingLayoutError> {
+        crate::text_system::streaming_layout::checked::validate_positive(
+            wrap_width,
+            crate::StreamingLayoutMetric::WrapWidth,
+        )?;
+        crate::text_system::streaming_layout::checked::validate_nonnegative(
+            first_line_inline_offset,
+            crate::StreamingLayoutMetric::InlineOffset,
+        )?;
+        crate::text_system::streaming_layout::checked::checked_pixel_add(
+            first_line_inline_offset,
+            self.width,
+            crate::StreamingLayoutComponent::WrapFacts,
+        )?;
+        Ok(self.compute_wrap_boundaries(text, wrap_width, first_line_inline_offset, max_lines))
     }
 }
 
@@ -465,6 +498,19 @@ impl LineLayoutCache {
         curr_frame.used_wrapped_lines.clear();
     }
 
+    #[cfg(feature = "test-support")]
+    pub(crate) fn entry_count(&self) -> usize {
+        let previous = self.previous_frame.lock();
+        let current = self.current_frame.read();
+        previous
+            .lines
+            .len()
+            .checked_add(previous.wrapped_lines.len())
+            .and_then(|count| count.checked_add(current.lines.len()))
+            .and_then(|count| count.checked_add(current.wrapped_lines.len()))
+            .expect("line layout cache entry count overflow")
+    }
+
     pub fn layout_wrapped_line<Text>(
         &self,
         text: Text,
@@ -503,7 +549,12 @@ impl LineLayoutCache {
             let text = SharedString::from(text);
             let unwrapped_layout = self.layout_line::<&SharedString>(&text, font_size, runs, None);
             let wrap_boundaries = if let Some(wrap_width) = wrap_width {
-                unwrapped_layout.compute_wrap_boundaries(text.as_ref(), wrap_width, max_lines)
+                unwrapped_layout.compute_wrap_boundaries(
+                    text.as_ref(),
+                    wrap_width,
+                    Pixels::ZERO,
+                    max_lines,
+                )
             } else {
                 SmallVec::new()
             };
@@ -565,17 +616,7 @@ impl LineLayoutCache {
                 .platform_text_system
                 .layout_line(&text, font_size, runs);
 
-            if let Some(force_width) = force_width {
-                let mut glyph_pos = 0;
-                for run in layout.runs.iter_mut() {
-                    for glyph in run.glyphs.iter_mut() {
-                        if (glyph.position.x - glyph_pos * force_width).abs() > px(1.) {
-                            glyph.position.x = glyph_pos * force_width;
-                        }
-                        glyph_pos += 1;
-                    }
-                }
-            }
+            apply_force_width(&mut layout, force_width);
 
             let key = Arc::new(CacheKey {
                 text,
@@ -588,6 +629,32 @@ impl LineLayoutCache {
             current_frame.lines.insert(key.clone(), layout.clone());
             current_frame.used_lines.push(key);
             layout
+        }
+    }
+
+    pub(crate) fn layout_line_uncached(
+        &self,
+        text: &str,
+        font_size: Pixels,
+        runs: &[FontRun],
+        force_width: Option<Pixels>,
+    ) -> Arc<LineLayout> {
+        let mut layout = self.platform_text_system.layout_line(text, font_size, runs);
+        apply_force_width(&mut layout, force_width);
+        Arc::new(layout)
+    }
+}
+
+fn apply_force_width(layout: &mut LineLayout, force_width: Option<Pixels>) {
+    if let Some(force_width) = force_width {
+        let mut glyph_pos = 0;
+        for run in layout.runs.iter_mut() {
+            for glyph in run.glyphs.iter_mut() {
+                if (glyph.position.x - glyph_pos * force_width).abs() > px(1.) {
+                    glyph.position.x = glyph_pos * force_width;
+                }
+                glyph_pos += 1;
+            }
         }
     }
 }

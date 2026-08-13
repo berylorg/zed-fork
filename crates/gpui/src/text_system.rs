@@ -3,6 +3,7 @@ mod font_features;
 mod line;
 mod line_layout;
 mod line_wrapper;
+mod streaming_layout;
 
 pub use font_fallbacks::*;
 pub use font_features::*;
@@ -11,6 +12,7 @@ pub use line_layout::*;
 pub use line_wrapper::*;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+pub use streaming_layout::*;
 
 use crate::{
     Bounds, DevicePixels, Hsla, Pixels, PlatformTextSystem, Point, Result, SharedString, Size,
@@ -539,6 +541,33 @@ impl WindowTextSystem {
         runs: &[TextRun],
         force_width: Option<Pixels>,
     ) -> Arc<LineLayout> {
+        self.layout_line_with_cache(text, font_size, runs, force_width, true)
+    }
+
+    pub(crate) fn layout_line_uncached(
+        &self,
+        text: &str,
+        font_size: Pixels,
+        runs: &[TextRun],
+        force_width: Option<Pixels>,
+    ) -> Arc<LineLayout> {
+        self.layout_line_with_cache(text, font_size, runs, force_width, false)
+    }
+
+    #[cfg(feature = "test-support")]
+    /// Returns a content-free count of ordinary cached line-layout entries.
+    pub fn line_layout_cache_entry_count(&self) -> usize {
+        self.line_layout_cache.entry_count()
+    }
+
+    fn layout_line_with_cache(
+        &self,
+        text: &str,
+        font_size: Pixels,
+        runs: &[TextRun],
+        force_width: Option<Pixels>,
+        use_cache: bool,
+    ) -> Arc<LineLayout> {
         let mut last_run = None::<&TextRun>;
         let mut last_font: Option<FontId> = None;
         let mut font_runs = self.font_runs_pool.lock().pop().unwrap_or_default();
@@ -573,12 +602,17 @@ impl WindowTextSystem {
             }
         }
 
-        let layout = self.line_layout_cache.layout_line(
-            &SharedString::new(text),
-            font_size,
-            &font_runs,
-            force_width,
-        );
+        let layout = if use_cache {
+            self.line_layout_cache.layout_line(
+                &SharedString::new(text),
+                font_size,
+                &font_runs,
+                force_width,
+            )
+        } else {
+            self.line_layout_cache
+                .layout_line_uncached(text, font_size, &font_runs, force_width)
+        };
 
         self.font_runs_pool.lock().push(font_runs);
 

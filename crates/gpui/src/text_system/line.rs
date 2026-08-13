@@ -69,7 +69,11 @@ impl ShapedLine {
     ) -> Result<()> {
         paint_line(
             origin,
+            origin.x,
+            self.layout.width,
+            line_height,
             &self.layout,
+            line_height,
             line_height,
             TextAlign::default(),
             None,
@@ -92,7 +96,11 @@ impl ShapedLine {
     ) -> Result<()> {
         paint_line_background(
             origin,
+            origin.x,
+            self.layout.width,
+            line_height,
             &self.layout,
+            line_height,
             line_height,
             TextAlign::default(),
             None,
@@ -141,7 +149,11 @@ impl WrappedLine {
 
         paint_line(
             origin,
+            origin.x,
+            self.layout.unwrapped_layout.width,
+            line_height * (self.wrap_boundaries.len() as f32 + 1.),
             &self.layout.unwrapped_layout,
+            line_height,
             line_height,
             align,
             align_width,
@@ -152,6 +164,98 @@ impl WrappedLine {
         )?;
 
         Ok(())
+    }
+
+    pub(crate) fn paint_streaming(
+        &self,
+        origin: Point<Pixels>,
+        first_line_inline_offset: Pixels,
+        line_height: Pixels,
+        first_line_block_extent: Pixels,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Result<()> {
+        let wrapped_origin_x = origin.x;
+        let origin = crate::text_system::streaming_layout::checked::checked_point_add(
+            origin,
+            point(first_line_inline_offset, Pixels::ZERO),
+            crate::StreamingLayoutComponent::Fragments,
+        )?;
+        let wrapped_height =
+            crate::text_system::streaming_layout::checked::checked_pixel_mul_usize(
+                line_height,
+                self.wrap_boundaries.len(),
+                crate::StreamingLayoutComponent::Fragments,
+            )?;
+        paint_line(
+            origin,
+            wrapped_origin_x,
+            crate::text_system::streaming_layout::checked::checked_pixel_add(
+                self.layout.unwrapped_layout.width,
+                first_line_inline_offset,
+                crate::StreamingLayoutComponent::Fragments,
+            )?,
+            crate::text_system::streaming_layout::checked::checked_pixel_add(
+                first_line_block_extent,
+                wrapped_height,
+                crate::StreamingLayoutComponent::Fragments,
+            )?,
+            &self.layout.unwrapped_layout,
+            line_height,
+            first_line_block_extent,
+            TextAlign::Left,
+            self.layout.wrap_width,
+            &self.decoration_runs,
+            &self.wrap_boundaries,
+            window,
+            cx,
+        )
+    }
+
+    pub(crate) fn paint_background_streaming(
+        &self,
+        origin: Point<Pixels>,
+        first_line_inline_offset: Pixels,
+        line_height: Pixels,
+        first_line_block_extent: Pixels,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Result<()> {
+        let wrapped_origin_x = origin.x;
+        let origin = crate::text_system::streaming_layout::checked::checked_point_add(
+            origin,
+            point(first_line_inline_offset, Pixels::ZERO),
+            crate::StreamingLayoutComponent::Fragments,
+        )?;
+        let wrapped_height =
+            crate::text_system::streaming_layout::checked::checked_pixel_mul_usize(
+                line_height,
+                self.wrap_boundaries.len(),
+                crate::StreamingLayoutComponent::Fragments,
+            )?;
+        paint_line_background(
+            origin,
+            wrapped_origin_x,
+            crate::text_system::streaming_layout::checked::checked_pixel_add(
+                self.layout.unwrapped_layout.width,
+                first_line_inline_offset,
+                crate::StreamingLayoutComponent::Fragments,
+            )?,
+            crate::text_system::streaming_layout::checked::checked_pixel_add(
+                first_line_block_extent,
+                wrapped_height,
+                crate::StreamingLayoutComponent::Fragments,
+            )?,
+            &self.layout.unwrapped_layout,
+            line_height,
+            first_line_block_extent,
+            TextAlign::Left,
+            self.layout.wrap_width,
+            &self.decoration_runs,
+            &self.wrap_boundaries,
+            window,
+            cx,
+        )
     }
 
     /// Paint the background of line of text to the window.
@@ -171,7 +275,11 @@ impl WrappedLine {
 
         paint_line_background(
             origin,
+            origin.x,
+            self.layout.unwrapped_layout.width,
+            line_height * (self.wrap_boundaries.len() as f32 + 1.),
             &self.layout.unwrapped_layout,
+            line_height,
             line_height,
             align,
             align_width,
@@ -187,8 +295,12 @@ impl WrappedLine {
 
 fn paint_line(
     origin: Point<Pixels>,
+    wrapped_origin_x: Pixels,
+    line_bounds_width: Pixels,
+    line_bounds_height: Pixels,
     layout: &LineLayout,
     line_height: Pixels,
+    first_line_block_extent: Pixels,
     align: TextAlign,
     align_width: Option<Pixels>,
     decoration_runs: &[DecorationRun],
@@ -197,17 +309,15 @@ fn paint_line(
     cx: &mut App,
 ) -> Result<()> {
     let line_bounds = Bounds::new(
-        origin,
-        size(
-            layout.width,
-            line_height * (wrap_boundaries.len() as f32 + 1.),
-        ),
+        point(wrapped_origin_x, origin.y),
+        size(line_bounds_width, line_bounds_height),
     );
     window.paint_layer(line_bounds, |window| {
         let padding_top = (line_height - layout.ascent - layout.descent) / 2.;
         let baseline_offset = point(px(0.), padding_top + layout.ascent);
         let mut decoration_runs = decoration_runs.iter();
         let mut wraps = wrap_boundaries.iter().peekable();
+        let mut current_line_block_extent = first_line_block_extent;
         let mut run_end = 0;
         let mut color = black();
         let mut current_underline: Option<(Point<Pixels>, UnderlineStyle)> = None;
@@ -238,6 +348,8 @@ fn paint_line(
 
                 if wraps.peek() == Some(&&WrapBoundary { run_ix, glyph_ix }) {
                     wraps.next();
+                    let block_advance = current_line_block_extent;
+                    current_line_block_extent = line_height;
                     if let Some((underline_origin, underline_style)) = current_underline.as_mut() {
                         if glyph_origin.x == underline_origin.x {
                             underline_origin.x -= max_glyph_size.width.half();
@@ -247,8 +359,8 @@ fn paint_line(
                             glyph_origin.x - underline_origin.x,
                             underline_style,
                         );
-                        underline_origin.x = origin.x;
-                        underline_origin.y += line_height;
+                        underline_origin.x = wrapped_origin_x;
+                        underline_origin.y += block_advance;
                     }
                     if let Some((strikethrough_origin, strikethrough_style)) =
                         current_strikethrough.as_mut()
@@ -261,19 +373,19 @@ fn paint_line(
                             glyph_origin.x - strikethrough_origin.x,
                             strikethrough_style,
                         );
-                        strikethrough_origin.x = origin.x;
-                        strikethrough_origin.y += line_height;
+                        strikethrough_origin.x = wrapped_origin_x;
+                        strikethrough_origin.y += block_advance;
                     }
 
                     glyph_origin.x = aligned_origin_x(
-                        origin,
+                        point(wrapped_origin_x, origin.y),
                         align_width.unwrap_or(layout.width),
                         glyph.position.x,
                         &align,
                         layout,
                         wraps.peek(),
                     );
-                    glyph_origin.y += line_height;
+                    glyph_origin.y += block_advance;
                 }
                 prev_glyph_position = glyph.position;
 
@@ -424,8 +536,12 @@ fn paint_line(
 
 fn paint_line_background(
     origin: Point<Pixels>,
+    wrapped_origin_x: Pixels,
+    line_bounds_width: Pixels,
+    line_bounds_height: Pixels,
     layout: &LineLayout,
     line_height: Pixels,
+    first_line_block_extent: Pixels,
     align: TextAlign,
     align_width: Option<Pixels>,
     decoration_runs: &[DecorationRun],
@@ -434,15 +550,13 @@ fn paint_line_background(
     cx: &mut App,
 ) -> Result<()> {
     let line_bounds = Bounds::new(
-        origin,
-        size(
-            layout.width,
-            line_height * (wrap_boundaries.len() as f32 + 1.),
-        ),
+        point(wrapped_origin_x, origin.y),
+        size(line_bounds_width, line_bounds_height),
     );
     window.paint_layer(line_bounds, |window| {
         let mut decoration_runs = decoration_runs.iter();
         let mut wraps = wrap_boundaries.iter().peekable();
+        let mut current_line_block_extent = first_line_block_extent;
         let mut run_end = 0;
         let mut current_background: Option<(Point<Pixels>, Hsla)> = None;
         let text_system = cx.text_system().clone();
@@ -467,6 +581,8 @@ fn paint_line_background(
 
                 if wraps.peek() == Some(&&WrapBoundary { run_ix, glyph_ix }) {
                     wraps.next();
+                    let block_advance = current_line_block_extent;
+                    current_line_block_extent = line_height;
                     if let Some((background_origin, background_color)) = current_background.as_mut()
                     {
                         if glyph_origin.x == background_origin.x {
@@ -479,19 +595,19 @@ fn paint_line_background(
                             },
                             *background_color,
                         ));
-                        background_origin.x = origin.x;
-                        background_origin.y += line_height;
+                        background_origin.x = wrapped_origin_x;
+                        background_origin.y += block_advance;
                     }
 
                     glyph_origin.x = aligned_origin_x(
-                        origin,
+                        point(wrapped_origin_x, origin.y),
                         align_width.unwrap_or(layout.width),
                         glyph.position.x,
                         &align,
                         layout,
                         wraps.peek(),
                     );
-                    glyph_origin.y += line_height;
+                    glyph_origin.y += block_advance;
                 }
                 prev_glyph_position = glyph.position;
 

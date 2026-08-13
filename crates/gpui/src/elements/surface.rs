@@ -29,6 +29,7 @@ pub struct Surface {
 }
 
 /// Create a new surface element.
+#[cfg_attr(not(target_os = "macos"), allow(unreachable_code))]
 pub fn surface(source: impl Into<SurfaceSource>) -> Surface {
     Surface {
         source: source.into(),

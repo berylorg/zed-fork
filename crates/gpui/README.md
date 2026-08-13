@@ -55,6 +55,50 @@ Each of these registers has one or more corresponding contexts that can be acces
 
 In addition to the systems above, GPUI provides a range of smaller services that are useful for building complex applications:
 
+### Bounded streaming text layout
+
+Very large logical lines can be laid out as ordered canonical segments without assembling one
+complete source string. A session is borrowed from a window's text system, so it cannot outlive the
+window-affine shaping context. Each segment is an independent shaping context; only exact visual
+placement continuation crosses segment boundaries.
+
+```no_run
+use gpui::{StreamingLayoutBinding, StreamingLayoutLimits, StreamingTextSegment, Window, px};
+
+fn shape_bounded_segment(window: &Window, segment: StreamingTextSegment) {
+    let binding = StreamingLayoutBinding {
+        input_id: 1,
+        segment_policy_id: 1,
+        wrap_width: px(480.),
+        font_size: px(14.),
+        line_height: px(20.),
+        limits: StreamingLayoutLimits {
+            segment_bytes: 4096,
+            runs: 64,
+            decorations: 64,
+            glyphs: 4096,
+            wraps: 256,
+            maps: 4097,
+            fragments: 1,
+            retained_bytes: 512 * 1024,
+        },
+    };
+    let mut session = window.text_system().streaming_layout_session(binding).unwrap();
+    let admission = session.admit_text(segment).unwrap();
+    assert_eq!(admission.fragments.len(), 1);
+    assert_eq!(admission.item_charge.fragments, 1);
+    assert_eq!(admission.item_charge.continuations, 1);
+    let retained_items = admission.item_charge.total().unwrap();
+    assert!(retained_items >= 2);
+}
+```
+
+Every successful admission reports both its existing exact retained-byte `charge` and a separate
+exact semantic-record `item_charge`. The item breakdown includes retained text payloads, caller
+style runs, private shaped runs, glyphs, decorations, wrap facts, maps, fragments, and compact
+continuations. `StreamingLayoutSession::retained_item_charge` reports only its live continuation;
+cancelled sessions report zero items.
+
 - Actions are user-defined structs that are used for converting keystrokes into logical operations in your UI. Use this for implementing keyboard shortcuts, such as cmd-q. See the `action` module for more information.
 
 - Platform services, such as `quit the app` or `open a URL` are available as methods on the `app::App`.
