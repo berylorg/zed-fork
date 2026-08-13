@@ -55,6 +55,23 @@ Each of these registers has one or more corresponding contexts that can be acces
 
 In addition to the systems above, GPUI provides a range of smaller services that are useful for building complex applications:
 
+### Scroll-handle identity
+
+`ScrollHandle::ptr_eq` reports whether two handles share the same retained scroll state. Clones of
+one handle compare equal, while separately constructed handles remain distinct even when their
+visible state is equal.
+
+```rust
+use gpui::ScrollHandle;
+
+let handle = ScrollHandle::new();
+let clone = handle.clone();
+let distinct = ScrollHandle::new();
+
+assert!(handle.ptr_eq(&clone));
+assert!(!handle.ptr_eq(&distinct));
+```
+
 ### Bounded streaming text layout
 
 Very large logical lines can be laid out as ordered canonical segments without assembling one

@@ -14,6 +14,16 @@ Maintain a narrow Beryl-oriented fork of upstream Zed that carries targeted GPUI
 
 The fork exists for targeted GPUI changes needed by Beryl and should remain easy to compare with upstream Zed.
 
+## Clone-Stable Scroll-Handle Identity
+
+GPUI `ScrollHandle` provides an app-neutral comparison that reports whether two handles share the
+same retained scroll state. The result is stable across clones of one handle and distinguishes
+separately created handles even when their visible scroll state is equal.
+
+The comparison exposes no pointer value, numeric address, inner retained state, mutable authority,
+consumer token, or application concept. It exists only to let reusable GPUI components bind
+retained interaction lifecycles to the actual handle that owns them.
+
 ## Glyph Batching Memory Optimization
 
 The fork may carry GPUI glyph batching memory optimization work that reduces transient allocation pressure and resident memory for Beryl's text-heavy UI.

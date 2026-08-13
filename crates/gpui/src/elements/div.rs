@@ -3079,6 +3079,14 @@ impl ScrollHandle {
         Self(Rc::default())
     }
 
+    /// Returns whether both handles share the same retained scroll state.
+    ///
+    /// Clones of one handle compare equal. Separately constructed handles do not compare equal,
+    /// even when their visible scroll state is identical.
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.0, &other.0)
+    }
+
     /// Get the current scroll offset.
     pub fn offset(&self) -> Point<Pixels> {
         *self.0.borrow().offset.borrow()
