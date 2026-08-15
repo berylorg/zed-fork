@@ -35,7 +35,7 @@ pub(super) fn decoration_runs(
 
 pub(super) fn build_maps(
     line: &WrappedLine,
-    logical_range: &Range<u64>,
+    logical_range: &Range<StreamingLayoutPosition>,
     first_inline: Pixels,
     origin: Point<Pixels>,
     line_height: Pixels,
@@ -73,12 +73,20 @@ pub(super) fn build_maps(
                     StreamingLayoutComponent::Maps,
                 )?;
             }
+            let byte_offset = checked::checked_u64_add(
+                logical_range.start.byte_offset,
+                checked::usize_to_u64(index, StreamingLayoutComponent::Maps)?,
+                StreamingLayoutComponent::Maps,
+            )?;
+            let logical_position = if index == 0 {
+                logical_range.start
+            } else if index == line.len() {
+                logical_range.end
+            } else {
+                StreamingLayoutPosition::at(byte_offset)
+            };
             Ok(StreamingLayoutMap {
-                logical_offset: checked::checked_u64_add(
-                    logical_range.start,
-                    checked::usize_to_u64(index, StreamingLayoutComponent::Maps)?,
-                    StreamingLayoutComponent::Maps,
-                )?,
+                logical_position,
                 position: checked::checked_point_add(
                     position,
                     origin,
@@ -92,8 +100,7 @@ pub(super) fn build_maps(
 pub(super) fn continue_after_text(
     prior: StreamingLayoutContinuation,
     layout: &WrappedLineLayout,
-    next_logical_offset: u64,
-    ends_line: bool,
+    next_position: StreamingLayoutPosition,
     line_height: Pixels,
 ) -> Result<StreamingLayoutContinuation, StreamingLayoutError> {
     let wrap_count = layout.wrap_boundaries.len();
@@ -134,12 +141,12 @@ pub(super) fn continue_after_text(
         )
     };
     let wrap_count_u64 = checked::usize_to_u64(wrap_count, StreamingLayoutComponent::Continuation)?;
-    let mut continuation =
+    let continuation =
         StreamingLayoutContinuation {
             next_ordinal: prior.next_ordinal.checked_add(1).ok_or(
                 StreamingLayoutError::Overflow(StreamingLayoutComponent::Continuation),
             )?,
-            next_logical_offset,
+            next_position,
             inline_offset,
             block_offset: checked::checked_pixel_add(
                 prior.block_offset,
@@ -147,26 +154,13 @@ pub(super) fn continue_after_text(
                 StreamingLayoutComponent::Continuation,
             )?,
             line_block_extent,
+            line_has_content: true,
             visual_lines: prior.visual_lines.checked_add(wrap_count_u64).ok_or(
                 StreamingLayoutError::Overflow(StreamingLayoutComponent::Continuation),
             )?,
+            line_finalized: false,
+            ..prior
         };
-    if ends_line {
-        continuation.inline_offset = Pixels::ZERO;
-        continuation.block_offset = checked::checked_pixel_add(
-            continuation.block_offset,
-            continuation.line_block_extent,
-            StreamingLayoutComponent::Continuation,
-        )?;
-        continuation.line_block_extent = line_height;
-        continuation.visual_lines =
-            continuation
-                .visual_lines
-                .checked_add(1)
-                .ok_or(StreamingLayoutError::Overflow(
-                    StreamingLayoutComponent::Continuation,
-                ))?;
-    }
     validate_continuation(continuation, line_height)?;
     Ok(continuation)
 }
@@ -196,12 +190,12 @@ pub(super) fn charge_text(
             size_of::<StreamingLayoutMap>(),
             StreamingLayoutComponent::Maps,
         )?,
+        objects: 0,
         fragments: checked::checked_sum(
             [
-                size_of::<Range<u64>>(),
+                size_of::<Range<StreamingLayoutPosition>>(),
                 size_of::<Point<Pixels>>(),
                 checked::checked_mul(3, size_of::<Pixels>(), StreamingLayoutComponent::Fragments)?,
-                size_of::<bool>(),
                 size_of::<Option<Pixels>>(),
                 charge_line_layout_metadata()?,
             ],
@@ -213,8 +207,15 @@ pub(super) fn charge_text(
 
 pub(super) fn item_charge_text(
     fragment: &StreamingTextFragment,
+    continuation: StreamingLayoutContinuation,
 ) -> Result<StreamingLayoutItemCharge, StreamingLayoutError> {
     let (shaped_runs, glyphs) = shaped_item_counts(fragment.line.runs())?;
+    let positions = fragment.maps.iter().map(|map| map.logical_position).chain([
+        fragment.logical_range.start,
+        fragment.logical_range.end,
+        continuation.next_position,
+    ]);
+    let (position_count, object_facts) = position_facts(positions)?;
     Ok(StreamingLayoutItemCharge {
         text_payloads: 1,
         style_runs: fragment.retained_runs.len(),
@@ -223,6 +224,10 @@ pub(super) fn item_charge_text(
         decorations: fragment.line.decoration_runs.len(),
         wrap_facts: fragment.line.layout.wrap_boundaries.len(),
         maps: fragment.maps.len(),
+        positions: position_count,
+        gap_witnesses: position_count,
+        object_ids: object_facts,
+        object_orders: object_facts,
         fragments: 1,
         continuations: 1,
     })
@@ -230,18 +235,98 @@ pub(super) fn item_charge_text(
 
 pub(super) fn item_charge_atom(
     fragment: &StreamingAtomFragment,
+    continuation: StreamingLayoutContinuation,
 ) -> Result<StreamingLayoutItemCharge, StreamingLayoutError> {
     let (shaped_runs, glyphs) = shaped_item_counts(&fragment.presentation_line.runs)?;
+    let (position_count, object_facts) =
+        position_facts(fragment.maps.iter().map(|map| map.logical_position).chain([
+            fragment.logical_range.start,
+            fragment.logical_range.end,
+            continuation.next_position,
+        ]))?;
     Ok(StreamingLayoutItemCharge {
         text_payloads: 1,
         shaped_runs,
         glyphs,
         decorations: fragment.presentation_line.decoration_runs.len(),
         maps: fragment.maps.len(),
+        positions: position_count,
+        gap_witnesses: position_count,
+        object_ids: object_facts,
+        object_orders: object_facts,
         fragments: 1,
         continuations: 1,
         ..Default::default()
     })
+}
+
+pub(super) fn item_charge_object(
+    fragment: &StreamingObjectFragment,
+    continuation: StreamingLayoutContinuation,
+) -> Result<StreamingLayoutItemCharge, StreamingLayoutError> {
+    let (shaped_runs, glyphs) = shaped_item_counts(&fragment.presentation_line.runs)?;
+    let (position_count, position_object_facts) =
+        position_facts(fragment.maps.iter().map(|map| map.logical_position).chain([
+            fragment.leading,
+            fragment.trailing,
+            continuation.next_position,
+        ]))?;
+    let object_facts =
+        checked::checked_add(position_object_facts, 1, StreamingLayoutComponent::Objects)?;
+    Ok(StreamingLayoutItemCharge {
+        text_payloads: 1,
+        shaped_runs,
+        glyphs,
+        decorations: fragment.presentation_line.decoration_runs.len(),
+        maps: 2,
+        positions: position_count,
+        gap_witnesses: position_count,
+        object_ids: object_facts,
+        object_orders: object_facts,
+        fragments: 1,
+        continuations: 1,
+        ..Default::default()
+    })
+}
+
+pub(super) fn position_facts(
+    positions: impl IntoIterator<Item = StreamingLayoutPosition>,
+) -> Result<(usize, usize), StreamingLayoutError> {
+    positions
+        .into_iter()
+        .try_fold((0, 0), |(count, objects), position| {
+            let edge_objects = usize::from(matches!(
+                position.gap.preceding,
+                StreamingObjectEdge::Object { .. }
+            )) + usize::from(matches!(
+                position.gap.following,
+                StreamingObjectEdge::Object { .. }
+            ));
+            Ok((
+                checked::checked_add(count, 1, StreamingLayoutComponent::Maps)?,
+                checked::checked_add(objects, edge_objects, StreamingLayoutComponent::Objects)?,
+            ))
+        })
+}
+
+pub(super) fn continuation_item_charge(
+    continuation: StreamingLayoutContinuation,
+) -> StreamingLayoutItemCharge {
+    let object_facts = usize::from(matches!(
+        continuation.next_position.gap.preceding,
+        StreamingObjectEdge::Object { .. }
+    )) + usize::from(matches!(
+        continuation.next_position.gap.following,
+        StreamingObjectEdge::Object { .. }
+    ));
+    StreamingLayoutItemCharge {
+        positions: 1,
+        gap_witnesses: 1,
+        object_ids: object_facts,
+        object_orders: object_facts,
+        continuations: 1,
+        ..Default::default()
+    }
 }
 
 fn shaped_item_counts(runs: &[crate::ShapedRun]) -> Result<(usize, usize), StreamingLayoutError> {
@@ -331,6 +416,7 @@ pub(super) fn validate_continuation(
     continuation: StreamingLayoutContinuation,
     line_height: Pixels,
 ) -> Result<(), StreamingLayoutError> {
+    continuation.next_position.validate()?;
     checked::validate_nonnegative(
         continuation.inline_offset,
         StreamingLayoutMetric::InlineOffset,
@@ -347,6 +433,44 @@ pub(super) fn validate_continuation(
         return Err(StreamingLayoutError::InvalidMetric(
             StreamingLayoutMetric::LineBlockExtent,
         ));
+    }
+    if continuation.finalized_logical_lines > continuation.visual_lines
+        || (continuation.line_finalized && continuation.finalized_logical_lines == 0)
+        || (continuation.ended && !continuation.line_finalized)
+    {
+        return Err(StreamingLayoutError::InvalidSegment);
+    }
+    if continuation.next_ordinal == 0 {
+        if continuation.line_has_content
+            || continuation.line_finalized
+            || continuation.ended
+            || continuation.visual_lines != 0
+            || continuation.finalized_logical_lines != 0
+        {
+            return Err(StreamingLayoutError::InvalidSegment);
+        }
+    } else if !continuation.line_has_content && !continuation.line_finalized {
+        return Err(StreamingLayoutError::InvalidSegment);
+    }
+    if continuation.line_finalized {
+        if continuation.inline_offset != Pixels::ZERO {
+            return Err(StreamingLayoutError::InvalidMetric(
+                StreamingLayoutMetric::InlineOffset,
+            ));
+        }
+        if continuation.line_block_extent != line_height {
+            return Err(StreamingLayoutError::InvalidMetric(
+                StreamingLayoutMetric::LineBlockExtent,
+            ));
+        }
+        if continuation.line_has_content {
+            return Err(StreamingLayoutError::InvalidSegment);
+        }
+    } else if !continuation.line_has_content && continuation.inline_offset != Pixels::ZERO {
+        return Err(StreamingLayoutError::InvalidSegment);
+    }
+    if continuation.ended && !continuation.next_position.gap.is_terminal() {
+        return Err(StreamingLayoutError::InvalidPosition);
     }
     Ok(())
 }

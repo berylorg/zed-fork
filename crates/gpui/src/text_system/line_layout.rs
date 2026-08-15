@@ -130,6 +130,7 @@ impl LineLayout {
         text: &str,
         wrap_width: Pixels,
         first_line_inline_offset: Pixels,
+        first_line_has_content: bool,
         max_lines: Option<usize>,
     ) -> SmallVec<[WrapBoundary; 1]> {
         let mut boundaries = SmallVec::new();
@@ -190,9 +191,7 @@ impl LineLayout {
                 };
 
             let can_wrap = boundary > last_boundary
-                || (boundaries.is_empty()
-                    && first_line_inline_offset > Pixels::ZERO
-                    && boundary == last_boundary);
+                || (boundaries.is_empty() && first_line_has_content && boundary == last_boundary);
             if width > wrap_width && can_wrap {
                 // When used line_clamp, we should limit the number of lines.
                 if let Some(max_lines) = max_lines
@@ -221,6 +220,7 @@ impl LineLayout {
         text: &str,
         wrap_width: Pixels,
         first_line_inline_offset: Pixels,
+        first_line_has_content: bool,
         max_lines: Option<usize>,
     ) -> Result<SmallVec<[WrapBoundary; 1]>, crate::StreamingLayoutError> {
         crate::text_system::streaming_layout::checked::validate_positive(
@@ -236,7 +236,13 @@ impl LineLayout {
             self.width,
             crate::StreamingLayoutComponent::WrapFacts,
         )?;
-        Ok(self.compute_wrap_boundaries(text, wrap_width, first_line_inline_offset, max_lines))
+        Ok(self.compute_wrap_boundaries(
+            text,
+            wrap_width,
+            first_line_inline_offset,
+            first_line_has_content,
+            max_lines,
+        ))
     }
 }
 
@@ -553,6 +559,7 @@ impl LineLayoutCache {
                     text.as_ref(),
                     wrap_width,
                     Pixels::ZERO,
+                    false,
                     max_lines,
                 )
             } else {

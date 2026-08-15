@@ -13,7 +13,7 @@ impl StreamingLayoutSession<'_> {
         self.continuation
     }
 
-    /// Exact payload retained by the session itself.
+    /// Exact bytes retained by the active session itself.
     pub fn retained_charge(&self) -> StreamingLayoutCharge {
         StreamingLayoutCharge {
             continuation: self
@@ -25,33 +25,32 @@ impl StreamingLayoutSession<'_> {
         }
     }
 
-    /// Exact semantic records retained by the session itself.
+    /// Exact semantic records retained by the active session itself.
     pub fn retained_item_charge(&self) -> StreamingLayoutItemCharge {
-        StreamingLayoutItemCharge {
-            continuations: usize::from(self.continuation.is_some()),
-            ..Default::default()
-        }
+        let Some(continuation) = self.continuation else {
+            return StreamingLayoutItemCharge::default();
+        };
+        continuation_item_charge(continuation)
     }
 
-    /// Cancels the session and releases its continuation. Later admissions are rejected.
+    /// Cancels the session and releases its compact continuation.
     pub fn cancel(&mut self) {
         self.continuation = None;
     }
 
-    /// Shapes and atomically admits one ordered ordinary segment.
+    /// Shapes and atomically admits one ordered ordinary canonical segment.
     pub fn admit_text(
         &mut self,
         segment: StreamingTextSegment,
     ) -> Result<StreamingLayoutAdmission, StreamingLayoutError> {
-        let prior = self.validate_order(
+        let prior = self.validate_header(
             segment.input_id,
             segment.segment_policy_id,
             segment.ordinal,
-            &segment.logical_range,
-            segment.next_logical_offset,
-            segment.ends_logical_line,
+            segment.logical_range.start,
         )?;
-        validate_continuation(prior, self.binding.line_height)?;
+        let logical_range = segment.logical_range.clone();
+        self.validate_source_range(&logical_range)?;
         if segment.text.len() > self.binding.limits.segment_bytes {
             return Err(StreamingLayoutError::CapacityExceeded(
                 StreamingLayoutComponent::SegmentText,
@@ -59,15 +58,9 @@ impl StreamingLayoutSession<'_> {
         }
         let text_len =
             checked::usize_to_u64(segment.text.len(), StreamingLayoutComponent::SegmentText)?;
-        let logical_len = segment
-            .logical_range
-            .end
-            .checked_sub(segment.logical_range.start)
-            .ok_or(StreamingLayoutError::InvalidSegment)?;
-        let run_len = segment.runs.iter().try_fold(0usize, |total, run| {
-            checked::checked_add(total, run.len, StreamingLayoutComponent::Runs)
-        })?;
-        if segment.text.contains('\n') || logical_len != text_len || run_len != segment.text.len() {
+        if logical_range.end.byte_offset - logical_range.start.byte_offset != text_len
+            || segment.text.contains('\n')
+        {
             return Err(StreamingLayoutError::InvalidSegment);
         }
         self.check_items(
@@ -75,6 +68,7 @@ impl StreamingLayoutSession<'_> {
             segment.runs.len(),
             self.binding.limits.runs,
         )?;
+        checked::validate_style_run_boundaries(segment.text.as_ref(), &segment.runs)?;
 
         let layout = self.text_system.layout_line_uncached(
             segment.text.as_ref(),
@@ -87,11 +81,12 @@ impl StreamingLayoutSession<'_> {
             segment.text.as_ref(),
             self.binding.wrap_width,
             prior.inline_offset,
+            prior.line_has_content,
             None,
         )?;
         let mut placement_prior = prior;
         if wrap_boundaries.first().is_some_and(|boundary| {
-            boundary.run_ix == 0 && boundary.glyph_ix == 0 && prior.inline_offset > Pixels::ZERO
+            boundary.run_ix == 0 && boundary.glyph_ix == 0 && prior.line_has_content
         }) {
             wrap_boundaries.remove(0);
             placement_prior.inline_offset = Pixels::ZERO;
@@ -101,6 +96,7 @@ impl StreamingLayoutSession<'_> {
                 StreamingLayoutComponent::Continuation,
             )?;
             placement_prior.line_block_extent = self.binding.line_height;
+            placement_prior.line_has_content = false;
             placement_prior.visual_lines = placement_prior.visual_lines.checked_add(1).ok_or(
                 StreamingLayoutError::Overflow(StreamingLayoutComponent::Continuation),
             )?;
@@ -124,16 +120,10 @@ impl StreamingLayoutSession<'_> {
             glyph_count,
             self.binding.limits.glyphs,
         )?;
-        let map_count = checked::checked_add(glyph_count, 1, StreamingLayoutComponent::Maps)?;
-        self.check_items(
-            StreamingLayoutComponent::Maps,
-            map_count,
-            self.binding.limits.maps,
-        )?;
 
         let line = Arc::new(WrappedLine {
             layout: Arc::new(WrappedLineLayout {
-                unwrapped_layout: layout.clone(),
+                unwrapped_layout: layout,
                 wrap_boundaries,
                 wrap_width: Some(self.binding.wrap_width),
             }),
@@ -143,7 +133,7 @@ impl StreamingLayoutSession<'_> {
         let origin = point(Pixels::ZERO, placement_prior.block_offset);
         let maps = build_maps(
             &line,
-            &segment.logical_range,
+            &logical_range,
             placement_prior.inline_offset,
             origin,
             self.binding.line_height,
@@ -159,276 +149,240 @@ impl StreamingLayoutSession<'_> {
             1,
             self.binding.limits.fragments,
         )?;
-        let continuation = continue_after_text(
+        let mut continuation = continue_after_text(
             placement_prior,
             &line.layout,
-            segment.next_logical_offset,
-            segment.ends_logical_line,
+            logical_range.end,
             self.binding.line_height,
         )?;
+        continuation.line_finalized = false;
         let fragment = StreamingTextFragment {
-            logical_range: segment.logical_range,
+            logical_range,
             line,
             retained_runs: segment.runs.into(),
             origin,
             first_line_inline_offset: placement_prior.inline_offset,
             line_height: self.binding.line_height,
             first_line_block_extent: placement_prior.line_block_extent,
-            owns_trailing_boundary: segment.ends_logical_line,
             maps: maps.into(),
         };
         let charge = charge_text(&fragment, continuation)?;
-        let item_charge = item_charge_text(&fragment)?;
-        item_charge.total()?;
-        self.check_total(charge)?;
-
-        let admission = StreamingLayoutAdmission {
-            fragments: Arc::from([StreamingLayoutFragment::Text(fragment)]),
+        let item_charge = item_charge_text(&fragment, continuation)?;
+        self.finish_admission(
+            StreamingLayoutFragment::Text(fragment),
             continuation,
             charge,
             item_charge,
-        };
-        self.continuation = Some(continuation);
-        Ok(admission)
+        )
     }
+}
 
-    /// Atomically admits one ordered compact oversize atom.
+impl StreamingLayoutSession<'_> {
+    /// Atomically admits one ordered compact nonempty source-covering atom.
     pub fn admit_oversize_atom(
         &mut self,
         atom: StreamingOversizeAtom,
     ) -> Result<StreamingLayoutAdmission, StreamingLayoutError> {
-        let prior = self.validate_order(
+        let prior = self.validate_header(
             atom.input_id,
             atom.segment_policy_id,
             atom.ordinal,
-            &atom.logical_range,
-            atom.next_logical_offset,
-            atom.ends_logical_line,
+            atom.logical_range.start,
         )?;
-        validate_continuation(prior, self.binding.line_height)?;
-        if atom.logical_range.start == atom.logical_range.end {
-            return Err(StreamingLayoutError::InvalidSegment);
-        }
-        checked::validate_nonnegative(atom.width, StreamingLayoutMetric::AtomWidth)?;
-        checked::validate_positive(atom.height, StreamingLayoutMetric::AtomHeight)?;
-        checked::validate_nonnegative(atom.baseline, StreamingLayoutMetric::AtomBaseline)?;
-        if atom.baseline > atom.height {
-            return Err(StreamingLayoutError::InvalidMetric(
-                StreamingLayoutMetric::AtomBaseline,
-            ));
-        }
-        if atom.presentation.len() > self.binding.limits.segment_bytes {
-            return Err(StreamingLayoutError::CapacityExceeded(
-                StreamingLayoutComponent::Fragments,
-            ));
-        }
-        let presentation_run_len = atom.runs.iter().try_fold(0usize, |total, run| {
-            checked::checked_add(total, run.len, StreamingLayoutComponent::Runs)
-        })?;
-        if presentation_run_len != atom.presentation.len() {
-            return Err(StreamingLayoutError::InvalidSegment);
-        }
-        self.check_items(
-            StreamingLayoutComponent::Runs,
-            atom.runs.len(),
-            self.binding.limits.runs,
+        self.validate_source_range(&atom.logical_range)?;
+        let prepared = self.prepare_inline(
+            prior,
+            &atom.presentation,
+            &atom.runs,
+            atom.width,
+            atom.height,
+            atom.baseline,
         )?;
-        self.check_items(
-            StreamingLayoutComponent::Fragments,
-            1,
-            self.binding.limits.fragments,
-        )?;
-        let presentation_decorations = decoration_runs(&atom.runs)?;
-        self.check_items(
-            StreamingLayoutComponent::Decorations,
-            presentation_decorations.len(),
-            self.binding.limits.decorations,
-        )?;
-
-        let mut inline = prior.inline_offset;
-        let mut block = prior.block_offset;
-        let mut visual_lines = prior.visual_lines;
-        let mut line_block_extent = prior.line_block_extent;
-        let proposed_inline =
-            checked::checked_pixel_add(inline, atom.width, StreamingLayoutComponent::Continuation)?;
-        if inline > Pixels::ZERO && proposed_inline > self.binding.wrap_width {
-            inline = Pixels::ZERO;
-            block = checked::checked_pixel_add(
-                block,
-                line_block_extent,
-                StreamingLayoutComponent::Continuation,
-            )?;
-            line_block_extent = self.binding.line_height;
-            visual_lines = visual_lines
-                .checked_add(1)
-                .ok_or(StreamingLayoutError::Overflow(
-                    StreamingLayoutComponent::Continuation,
-                ))?;
-        }
-        let atom_inline_end =
-            checked::checked_pixel_add(inline, atom.width, StreamingLayoutComponent::Continuation)?;
-        if atom.height > line_block_extent {
-            line_block_extent = atom.height;
-        }
-        let presentation_line = Arc::new(ShapedLine {
-            layout: self.text_system.layout_line_uncached(
-                atom.presentation.as_ref(),
-                self.binding.font_size,
-                &atom.runs,
-                Some(atom.width),
-            ),
-            text: atom.presentation.clone(),
-            decoration_runs: presentation_decorations,
-        });
-        validate_layout_metrics(&presentation_line)?;
-        if !atom.presentation.is_empty() {
-            if atom.baseline < presentation_line.ascent {
-                return Err(StreamingLayoutError::InvalidMetric(
-                    StreamingLayoutMetric::AtomBaseline,
-                ));
-            }
-            let presentation_bottom = checked::checked_pixel_add(
-                atom.baseline,
-                presentation_line.descent,
-                StreamingLayoutComponent::Fragments,
-            )?;
-            if presentation_bottom > atom.height {
-                return Err(StreamingLayoutError::InvalidMetric(
-                    StreamingLayoutMetric::AtomHeight,
-                ));
-            }
-        }
-        let presentation_glyphs =
-            presentation_line
-                .runs
-                .iter()
-                .try_fold(0usize, |total, run| {
-                    checked::checked_add(total, run.glyphs.len(), StreamingLayoutComponent::Glyphs)
-                })?;
-        self.check_items(
-            StreamingLayoutComponent::Glyphs,
-            presentation_glyphs,
-            self.binding.limits.glyphs,
-        )?;
-        let logical_start = atom.logical_range.start;
-        let logical_end = atom.logical_range.end;
+        let logical_range = atom.logical_range;
+        let maps = [
+            StreamingLayoutMap {
+                logical_position: logical_range.start,
+                position: prepared.bounds.origin,
+            },
+            StreamingLayoutMap {
+                logical_position: logical_range.end,
+                position: point(prepared.inline_end, prepared.bounds.origin.y),
+            },
+        ];
+        let logical_end = logical_range.end;
         let fragment = StreamingAtomFragment {
-            logical_range: atom.logical_range,
+            logical_range,
             presentation: atom.presentation,
-            presentation_line,
-            bounds: Bounds::new(point(inline, block), size(atom.width, atom.height)),
+            presentation_line: prepared.line,
+            bounds: prepared.bounds,
             baseline: atom.baseline,
             background: atom.background,
-            owns_trailing_boundary: atom.ends_logical_line,
-            maps: [
-                StreamingLayoutMap {
-                    logical_offset: logical_start,
-                    position: point(inline, block),
-                },
-                StreamingLayoutMap {
-                    logical_offset: logical_end,
-                    position: point(atom_inline_end, block),
-                },
-            ],
+            maps,
         };
-        let mut continuation = StreamingLayoutContinuation {
+        let continuation = StreamingLayoutContinuation {
             next_ordinal: prior.next_ordinal.checked_add(1).ok_or(
                 StreamingLayoutError::Overflow(StreamingLayoutComponent::Continuation),
             )?,
-            next_logical_offset: atom.next_logical_offset,
-            inline_offset: atom_inline_end,
-            block_offset: block,
-            line_block_extent,
-            visual_lines,
+            next_position: logical_end,
+            inline_offset: prepared.inline_end,
+            block_offset: prepared.bounds.origin.y,
+            line_block_extent: prepared.line_block_extent,
+            line_has_content: true,
+            visual_lines: prepared.visual_lines,
+            line_finalized: false,
+            ..prior
         };
-        if atom.ends_logical_line {
-            continuation.inline_offset = Pixels::ZERO;
-            continuation.block_offset = checked::checked_pixel_add(
-                continuation.block_offset,
-                continuation.line_block_extent,
-                StreamingLayoutComponent::Continuation,
-            )?;
-            continuation.line_block_extent = self.binding.line_height;
-            continuation.visual_lines =
-                continuation
-                    .visual_lines
-                    .checked_add(1)
-                    .ok_or(StreamingLayoutError::Overflow(
-                        StreamingLayoutComponent::Continuation,
-                    ))?;
-        }
-        let charge = StreamingLayoutCharge {
-            decorations: checked::checked_mul(
-                fragment.presentation_line.decoration_runs.len(),
-                size_of::<crate::DecorationRun>(),
-                StreamingLayoutComponent::Decorations,
-            )?,
-            glyphs: charge_glyphs(&fragment.presentation_line.runs)?,
-            fragments: checked::checked_sum(
-                [
-                    size_of::<Range<u64>>(),
-                    fragment.presentation.len(),
-                    size_of::<Bounds<Pixels>>(),
-                    size_of::<Pixels>(),
-                    size_of::<Option<Hsla>>(),
-                    size_of::<bool>(),
-                    charge_line_layout_metadata()?,
-                ],
-                StreamingLayoutComponent::Fragments,
-            )?,
-            maps: checked::checked_mul(
-                2,
-                size_of::<StreamingLayoutMap>(),
-                StreamingLayoutComponent::Maps,
-            )?,
-            continuation: size_of::<StreamingLayoutContinuation>(),
-            ..Default::default()
-        };
-        let item_charge = item_charge_atom(&fragment)?;
-        item_charge.total()?;
-        self.check_items(StreamingLayoutComponent::Maps, 2, self.binding.limits.maps)?;
-        self.check_total(charge)?;
-
-        let admission = StreamingLayoutAdmission {
-            fragments: Arc::from([StreamingLayoutFragment::OversizeAtom(fragment)]),
+        let charge = self.inline_charge(
+            &fragment.presentation,
+            &fragment.presentation_line,
+            size_of::<Range<StreamingLayoutPosition>>(),
+        )?;
+        let item_charge = item_charge_atom(&fragment, continuation)?;
+        self.finish_admission(
+            StreamingLayoutFragment::OversizeAtom(fragment),
             continuation,
             charge,
             item_charge,
-        };
-        self.continuation = Some(continuation);
-        Ok(admission)
+        )
     }
 
-    fn validate_order(
+    /// Atomically admits one ordered source-zero-width opaque object.
+    pub fn admit_inline_object(
+        &mut self,
+        object: StreamingInlineObject,
+    ) -> Result<StreamingLayoutAdmission, StreamingLayoutError> {
+        let prior = self.validate_header(
+            object.input_id,
+            object.segment_policy_id,
+            object.ordinal,
+            object.leading,
+        )?;
+        self.validate_object_edges(&object)?;
+        let prepared = self.prepare_inline(
+            prior,
+            &object.presentation,
+            &object.runs,
+            object.width,
+            object.height,
+            object.baseline,
+        )?;
+        let maps = [
+            StreamingLayoutMap {
+                logical_position: object.leading,
+                position: prepared.bounds.origin,
+            },
+            StreamingLayoutMap {
+                logical_position: object.trailing,
+                position: point(prepared.inline_end, prepared.bounds.origin.y),
+            },
+        ];
+        let fragment = StreamingObjectFragment {
+            id: object.id,
+            order: object.order,
+            leading: object.leading,
+            trailing: object.trailing,
+            presentation: object.presentation,
+            presentation_line: prepared.line,
+            bounds: prepared.bounds,
+            baseline: object.baseline,
+            background: object.background,
+            maps,
+        };
+        let continuation = StreamingLayoutContinuation {
+            next_ordinal: prior.next_ordinal.checked_add(1).ok_or(
+                StreamingLayoutError::Overflow(StreamingLayoutComponent::Continuation),
+            )?,
+            next_position: object.trailing,
+            inline_offset: prepared.inline_end,
+            block_offset: prepared.bounds.origin.y,
+            line_block_extent: prepared.line_block_extent,
+            line_has_content: true,
+            visual_lines: prepared.visual_lines,
+            line_finalized: false,
+            ..prior
+        };
+        let mut charge =
+            self.inline_charge(&fragment.presentation, &fragment.presentation_line, 0)?;
+        charge.objects = checked::checked_sum(
+            [
+                size_of::<StreamingObjectId>(),
+                size_of::<StreamingObjectOrder>(),
+                2 * size_of::<StreamingLayoutPosition>(),
+            ],
+            StreamingLayoutComponent::Objects,
+        )?;
+        let item_charge = item_charge_object(&fragment, continuation)?;
+        self.finish_admission(
+            StreamingLayoutFragment::InlineObject(fragment),
+            continuation,
+            charge,
+            item_charge,
+        )
+    }
+}
+
+impl StreamingLayoutSession<'_> {
+    pub(super) fn validate_header(
         &self,
         input_id: u64,
         segment_policy_id: u64,
         ordinal: u64,
-        logical_range: &Range<u64>,
-        next_logical_offset: u64,
-        ends_logical_line: bool,
+        start: StreamingLayoutPosition,
     ) -> Result<StreamingLayoutContinuation, StreamingLayoutError> {
         let prior = self.continuation.ok_or(StreamingLayoutError::Cancelled)?;
+        if prior.ended {
+            return Err(StreamingLayoutError::Ended);
+        }
         if input_id != self.binding.input_id {
             return Err(StreamingLayoutError::InputMismatch);
         }
         if segment_policy_id != self.binding.segment_policy_id {
             return Err(StreamingLayoutError::SegmentPolicyMismatch);
         }
-        if ordinal != prior.next_ordinal || logical_range.start != prior.next_logical_offset {
+        start.validate()?;
+        if ordinal != prior.next_ordinal || start != prior.next_position {
             return Err(StreamingLayoutError::OutOfOrder);
         }
-        if logical_range.start > logical_range.end
-            || (logical_range.start == logical_range.end && !ends_logical_line)
-            || next_logical_offset < logical_range.end
-            || (!ends_logical_line && next_logical_offset != logical_range.end)
-        {
-            return Err(StreamingLayoutError::InvalidSegment);
-        }
+        validate_continuation(prior, self.binding.line_height)?;
         Ok(prior)
     }
 
-    fn check_items(
+    pub(super) fn validate_source_range(
+        &self,
+        range: &Range<StreamingLayoutPosition>,
+    ) -> Result<(), StreamingLayoutError> {
+        range.start.validate()?;
+        range.end.validate()?;
+        if range.start.byte_offset >= range.end.byte_offset {
+            return Err(StreamingLayoutError::InvalidSegment);
+        }
+        if !range.start.gap.is_terminal() || !range.end.gap.is_source_range_end() {
+            return Err(StreamingLayoutError::InvalidPosition);
+        }
+        Ok(())
+    }
+
+    pub(super) fn finish_admission(
+        &mut self,
+        fragment: StreamingLayoutFragment,
+        continuation: StreamingLayoutContinuation,
+        charge: StreamingLayoutCharge,
+        item_charge: StreamingLayoutItemCharge,
+    ) -> Result<StreamingLayoutAdmission, StreamingLayoutError> {
+        validate_continuation(continuation, self.binding.line_height)?;
+        self.check_total(charge)?;
+        self.check_semantic_total(item_charge)?;
+        let admission = StreamingLayoutAdmission {
+            fragments: Arc::from([fragment]),
+            continuation,
+            charge,
+            item_charge,
+        };
+        self.continuation = Some(continuation);
+        Ok(admission)
+    }
+
+    pub(super) fn check_items(
         &self,
         component: StreamingLayoutComponent,
         actual: usize,
@@ -443,6 +397,19 @@ impl StreamingLayoutSession<'_> {
 
     fn check_total(&self, charge: StreamingLayoutCharge) -> Result<(), StreamingLayoutError> {
         if charge.total()? > self.binding.limits.retained_bytes {
+            Err(StreamingLayoutError::CapacityExceeded(
+                StreamingLayoutComponent::Total,
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn check_semantic_total(
+        &self,
+        charge: StreamingLayoutItemCharge,
+    ) -> Result<(), StreamingLayoutError> {
+        if charge.total()? > self.binding.limits.retained_items {
             Err(StreamingLayoutError::CapacityExceeded(
                 StreamingLayoutComponent::Total,
             ))

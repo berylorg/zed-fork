@@ -6,96 +6,16 @@ use std::{mem::size_of, ops::Range, sync::Arc};
 
 mod accounting;
 pub(crate) mod checked;
+mod finalization;
 mod fragments;
+mod inline;
+mod inputs;
+mod object_fragments;
+mod position;
 mod session;
 
-/// Finite admission limits for one bounded streaming text-layout session.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct StreamingLayoutLimits {
-    /// Maximum UTF-8 bytes in one ordinary canonical shaping segment.
-    pub segment_bytes: usize,
-    /// Maximum style runs retained by one returned fragment.
-    pub runs: usize,
-    /// Maximum decoration runs retained by one returned fragment.
-    pub decorations: usize,
-    /// Maximum shaped glyphs retained by one returned fragment.
-    pub glyphs: usize,
-    /// Maximum wrap facts retained by one returned fragment.
-    pub wraps: usize,
-    /// Maximum caret/hit-test map facts retained by one returned fragment.
-    pub maps: usize,
-    /// Maximum fragments returned by one admission.
-    pub fragments: usize,
-    /// Maximum total retained payload bytes returned by one admission.
-    pub retained_bytes: usize,
-}
-
-/// Immutable glyph- and placement-affecting inputs for a streaming session.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StreamingLayoutBinding {
-    /// Stable identity of the caller's complete immutable shaping-input set.
-    pub input_id: u64,
-    /// Stable identity of the canonical segmentation policy.
-    pub segment_policy_id: u64,
-    /// Width available to every visual line.
-    pub wrap_width: Pixels,
-    /// Font size used for shaping.
-    pub font_size: Pixels,
-    /// Height used to place successive visual lines.
-    pub line_height: Pixels,
-    /// Finite session admission limits.
-    pub limits: StreamingLayoutLimits,
-}
-
-/// One already-bounded ordinary canonical shaping segment.
-#[derive(Clone, Debug)]
-pub struct StreamingTextSegment {
-    /// Immutable-input identity, which must match the session binding.
-    pub input_id: u64,
-    /// Canonical-policy identity, which must match the session binding.
-    pub segment_policy_id: u64,
-    /// Monotonic segment ordinal.
-    pub ordinal: u64,
-    /// Exact consumer logical byte range represented by `text`.
-    pub logical_range: Range<u64>,
-    /// Exact next logical offset, including any consumer-owned line delimiter.
-    pub next_logical_offset: u64,
-    /// Complete text for this bounded shaping context.
-    pub text: SharedString,
-    /// Complete style runs for this segment.
-    pub runs: Vec<TextRun>,
-    /// Whether this segment terminates its consumer logical line.
-    pub ends_logical_line: bool,
-}
-
-/// Bounded presentation for an indivisible logical range whose source is not retained.
-#[derive(Clone, Debug)]
-pub struct StreamingOversizeAtom {
-    /// Immutable-input identity, which must match the session binding.
-    pub input_id: u64,
-    /// Canonical-policy identity, which must match the session binding.
-    pub segment_policy_id: u64,
-    /// Monotonic segment ordinal.
-    pub ordinal: u64,
-    /// Exact consumer logical range represented by this atom.
-    pub logical_range: Range<u64>,
-    /// Exact next logical offset, including any consumer-owned line delimiter.
-    pub next_logical_offset: u64,
-    /// Bounded visible placeholder; this is presentation, not source content.
-    pub presentation: SharedString,
-    /// Complete style runs for the bounded presentation.
-    pub runs: Vec<TextRun>,
-    /// Exact inline extent of the presentation atom.
-    pub width: Pixels,
-    /// Exact block extent of the presentation atom.
-    pub height: Pixels,
-    /// Baseline offset from the atom's top edge.
-    pub baseline: Pixels,
-    /// Optional app-neutral atom background.
-    pub background: Option<Hsla>,
-    /// Whether this atom terminates its consumer logical line.
-    pub ends_logical_line: bool,
-}
+pub use inputs::*;
+pub use position::*;
 
 /// Typed streaming-layout rejection. Rejection never advances session continuation.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -110,8 +30,12 @@ pub enum StreamingLayoutError {
     SegmentPolicyMismatch,
     /// The ordinal or exact logical range is not the next ordered input.
     OutOfOrder,
+    /// A composite position or adjacent-object witness is malformed.
+    InvalidPosition,
     /// Text or style runs do not exactly describe the logical range.
     InvalidSegment,
+    /// The session already accepted end of source.
+    Ended,
     /// Actual retained component payload would exceed a finite limit.
     CapacityExceeded(StreamingLayoutComponent),
     /// Exact arithmetic or an integer conversion could not be represented.
@@ -170,6 +94,8 @@ pub enum StreamingLayoutComponent {
     WrapFacts,
     /// Caret and hit-test map facts.
     Maps,
+    /// Inline-object identity, order, and geometry facts.
+    Objects,
     /// Fragment records.
     Fragments,
     /// Compact continuation record.
@@ -198,6 +124,8 @@ pub struct StreamingLayoutCharge {
     pub wrap_facts: usize,
     /// Caret/hit-test map facts.
     pub maps: usize,
+    /// Inline-object identity, order, and geometry facts.
+    pub objects: usize,
     /// Fragment records and bounded atom presentation.
     pub fragments: usize,
     /// Compact continuation record.
@@ -215,6 +143,7 @@ impl StreamingLayoutCharge {
                 self.glyphs,
                 self.wrap_facts,
                 self.maps,
+                self.objects,
                 self.fragments,
                 self.continuation,
             ],
@@ -246,6 +175,14 @@ pub struct StreamingLayoutItemCharge {
     pub wrap_facts: usize,
     /// Caret and hit-test map records.
     pub maps: usize,
+    /// Composite-position records.
+    pub positions: usize,
+    /// Adjacent-object gap-witness records.
+    pub gap_witnesses: usize,
+    /// Retained object-identity records.
+    pub object_ids: usize,
+    /// Retained object-order records.
+    pub object_orders: usize,
     /// Text or oversize-atom fragment records.
     pub fragments: usize,
     /// Compact continuation records.
@@ -264,6 +201,10 @@ impl StreamingLayoutItemCharge {
                 self.decorations,
                 self.wrap_facts,
                 self.maps,
+                self.positions,
+                self.gap_witnesses,
+                self.object_ids,
+                self.object_orders,
                 self.fragments,
                 self.continuations,
             ],
@@ -272,22 +213,20 @@ impl StreamingLayoutItemCharge {
     }
 }
 
-/// Result of hit-testing one fragment without stealing an adjacent shared boundary.
+/// Exact result owned by one fragment's hit-test geometry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StreamingLayoutHit {
-    /// The point precedes this fragment's geometric ownership.
-    BeforeFragment,
-    /// The point resolves to an exact logical offset owned by this fragment.
-    Offset(u64),
-    /// The point follows this fragment, including its unowned trailing shared boundary.
-    AfterFragment,
+    /// The point resolves to an exact composite gap owned by this fragment.
+    Gap(StreamingLayoutPosition),
+    /// The point resolves to one realized source-zero-width object.
+    Object(StreamingObjectId),
 }
 
 /// A compact exact source-to-inline placement fact.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct StreamingLayoutMap {
-    /// Exact consumer logical offset.
-    pub logical_offset: u64,
+    /// Exact composite stream position.
+    pub logical_position: StreamingLayoutPosition,
     /// Position relative to the session origin.
     pub position: Point<Pixels>,
 }
@@ -295,18 +234,30 @@ pub struct StreamingLayoutMap {
 /// Compact bounded placement state carried between independent shaping segments.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct StreamingLayoutContinuation {
+    /// Immutable-input identity required by a resumed session.
+    pub input_id: u64,
+    /// Canonical segment-policy identity required by a resumed session.
+    pub segment_policy_id: u64,
     /// Ordinal required by the next admission.
     pub next_ordinal: u64,
-    /// Exact logical offset required by the next admission.
-    pub next_logical_offset: u64,
+    /// Exact composite position required by the next admission.
+    pub next_position: StreamingLayoutPosition,
     /// Current visual-line inline placement.
     pub inline_offset: Pixels,
     /// Current visual-line block placement.
     pub block_offset: Pixels,
     /// Maximum block extent contributed by content on the current visual line.
     pub line_block_extent: Pixels,
+    /// Whether the current visual line contains an admitted item, including a zero-width item.
+    pub line_has_content: bool,
     /// Number of completed visual lines.
     pub visual_lines: u64,
+    /// Number of explicitly finalized logical lines.
+    pub finalized_logical_lines: u64,
+    /// Whether the preceding ordered input was an explicit line finalization.
+    pub line_finalized: bool,
+    /// Whether end of source has been accepted.
+    pub ended: bool,
 }
 
 /// An immutable admitted text or oversize-atom fragment.
@@ -316,19 +267,22 @@ pub enum StreamingLayoutFragment {
     Text(StreamingTextFragment),
     /// One compact oversize presentation atom with no source bytes.
     OversizeAtom(StreamingAtomFragment),
+    /// One source-zero-width opaque object.
+    InlineObject(StreamingObjectFragment),
+    /// Explicit logical-line or end-of-source boundary geometry.
+    Boundary(StreamingBoundaryFragment),
 }
 
 /// Immutable shape, placement, and interaction facts for one ordinary segment.
 #[derive(Clone, Debug)]
 pub struct StreamingTextFragment {
-    logical_range: Range<u64>,
+    logical_range: Range<StreamingLayoutPosition>,
     line: Arc<WrappedLine>,
     retained_runs: Arc<[TextRun]>,
     origin: Point<Pixels>,
     first_line_inline_offset: Pixels,
     line_height: Pixels,
     first_line_block_extent: Pixels,
-    owns_trailing_boundary: bool,
     maps: Arc<[StreamingLayoutMap]>,
 }
 
@@ -336,7 +290,7 @@ pub struct StreamingTextFragment {
 #[derive(Clone, Debug)]
 pub struct StreamingAtomFragment {
     /// Exact consumer logical range represented without source bytes.
-    pub logical_range: Range<u64>,
+    pub logical_range: Range<StreamingLayoutPosition>,
     /// Bounded presentation placeholder.
     pub presentation: SharedString,
     presentation_line: Arc<ShapedLine>,
@@ -344,8 +298,45 @@ pub struct StreamingAtomFragment {
     pub bounds: Bounds<Pixels>,
     baseline: Pixels,
     background: Option<Hsla>,
-    owns_trailing_boundary: bool,
     maps: [StreamingLayoutMap; 2],
+}
+
+/// Immutable geometry and interaction facts for one zero-width object.
+#[derive(Clone, Debug)]
+pub struct StreamingObjectFragment {
+    /// Stable opaque identity.
+    pub id: StreamingObjectId,
+    /// Stable same-anchor order key.
+    pub order: StreamingObjectOrder,
+    /// Exact leading composite gap.
+    pub leading: StreamingLayoutPosition,
+    /// Exact trailing composite gap.
+    pub trailing: StreamingLayoutPosition,
+    /// Bounded presentation placeholder.
+    pub presentation: SharedString,
+    presentation_line: Arc<ShapedLine>,
+    /// Exact bounds relative to the streaming session origin.
+    pub bounds: Bounds<Pixels>,
+    baseline: Pixels,
+    background: Option<Hsla>,
+    maps: [StreamingLayoutMap; 2],
+}
+
+/// Kind of explicit stream boundary represented by a boundary fragment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StreamingBoundaryKind {
+    /// One explicitly finalized logical line.
+    LogicalLine,
+    /// The terminal remaining logical line.
+    EndOfSource,
+}
+
+/// Immutable caret geometry for an explicit stream boundary.
+#[derive(Clone, Debug)]
+pub struct StreamingBoundaryFragment {
+    /// Boundary transition represented by this fragment.
+    pub kind: StreamingBoundaryKind,
+    maps: Arc<[StreamingLayoutMap]>,
 }
 
 /// One atomically admitted result. Errors leave the prior continuation untouched.
@@ -379,18 +370,30 @@ impl WindowTextSystem {
     ) -> Result<StreamingLayoutSession<'_>, StreamingLayoutError> {
         validate_binding(&binding)?;
         let line_height = binding.line_height;
+        let input_id = binding.input_id;
+        let segment_policy_id = binding.segment_policy_id;
+        let start_position = binding.start_position;
+
+        let continuation = StreamingLayoutContinuation {
+            input_id,
+            segment_policy_id,
+            next_ordinal: 0,
+            next_position: start_position,
+            inline_offset: Pixels::ZERO,
+            block_offset: Pixels::ZERO,
+            line_block_extent: line_height,
+            line_has_content: false,
+            visual_lines: 0,
+            finalized_logical_lines: 0,
+            line_finalized: false,
+            ended: false,
+        };
+        validate_continuation_capacity(&binding, continuation)?;
 
         Ok(StreamingLayoutSession {
             text_system: self,
             binding,
-            continuation: Some(StreamingLayoutContinuation {
-                next_ordinal: 0,
-                next_logical_offset: 0,
-                inline_offset: Pixels::ZERO,
-                block_offset: Pixels::ZERO,
-                line_block_extent: line_height,
-                visual_lines: 0,
-            }),
+            continuation: Some(continuation),
         })
     }
 
@@ -405,6 +408,13 @@ impl WindowTextSystem {
     ) -> Result<StreamingLayoutSession<'_>, StreamingLayoutError> {
         validate_binding(&binding)?;
         accounting::validate_continuation(continuation, binding.line_height)?;
+        if continuation.input_id != binding.input_id {
+            return Err(StreamingLayoutError::InputMismatch);
+        }
+        if continuation.segment_policy_id != binding.segment_policy_id {
+            return Err(StreamingLayoutError::SegmentPolicyMismatch);
+        }
+        validate_continuation_capacity(&binding, continuation)?;
         Ok(StreamingLayoutSession {
             text_system: self,
             binding,
@@ -413,7 +423,24 @@ impl WindowTextSystem {
     }
 }
 
+fn validate_continuation_capacity(
+    binding: &StreamingLayoutBinding,
+    continuation: StreamingLayoutContinuation,
+) -> Result<(), StreamingLayoutError> {
+    if size_of::<StreamingLayoutContinuation>() > binding.limits.retained_bytes
+        || accounting::continuation_item_charge(continuation).total()?
+            > binding.limits.retained_items
+    {
+        Err(StreamingLayoutError::CapacityExceeded(
+            StreamingLayoutComponent::Total,
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 fn validate_binding(binding: &StreamingLayoutBinding) -> Result<(), StreamingLayoutError> {
+    binding.start_position.validate()?;
     let limits = binding.limits;
     checked::validate_positive(binding.wrap_width, StreamingLayoutMetric::WrapWidth)?;
     checked::validate_positive(binding.font_size, StreamingLayoutMetric::FontSize)?;
@@ -425,6 +452,7 @@ fn validate_binding(binding: &StreamingLayoutBinding) -> Result<(), StreamingLay
         || limits.wraps == 0
         || limits.maps == 0
         || limits.fragments == 0
+        || limits.retained_items == 0
         || limits.retained_bytes == 0
     {
         return Err(StreamingLayoutError::InvalidConfiguration);

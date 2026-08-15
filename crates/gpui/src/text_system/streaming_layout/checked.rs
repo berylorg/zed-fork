@@ -1,7 +1,24 @@
 use super::{
     Pixels, Point, StreamingLayoutComponent, StreamingLayoutError, StreamingLayoutMetric, point,
 };
-use crate::px;
+use crate::{TextRun, px};
+
+pub(super) fn validate_style_run_boundaries(
+    text: &str,
+    runs: &[TextRun],
+) -> Result<(), StreamingLayoutError> {
+    let mut boundary = 0usize;
+    for run in runs {
+        boundary = checked_add(boundary, run.len, StreamingLayoutComponent::Runs)?;
+        if boundary > text.len() || !text.is_char_boundary(boundary) {
+            return Err(StreamingLayoutError::InvalidSegment);
+        }
+    }
+    if boundary != text.len() {
+        return Err(StreamingLayoutError::InvalidSegment);
+    }
+    Ok(())
+}
 
 pub(crate) fn validate_positive(
     value: Pixels,

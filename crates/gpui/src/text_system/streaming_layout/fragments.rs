@@ -2,7 +2,7 @@ use super::*;
 
 impl StreamingTextFragment {
     /// Exact consumer logical range represented by this fragment.
-    pub fn logical_range(&self) -> Range<u64> {
+    pub fn logical_range(&self) -> Range<StreamingLayoutPosition> {
         self.logical_range.clone()
     }
 
@@ -26,11 +26,26 @@ impl StreamingTextFragment {
         &self.maps
     }
 
-    /// Returns the exact position for a segment-local UTF-8 byte index.
-    pub fn position_for_index(
+    /// Returns exact caret geometry for one composite position in this fragment.
+    pub fn position_for_logical_position(
         &self,
-        index: usize,
+        logical_position: StreamingLayoutPosition,
     ) -> Result<Option<Point<Pixels>>, StreamingLayoutError> {
+        logical_position.validate()?;
+        if logical_position == self.logical_range.end {
+            return Ok(None);
+        }
+        let index = if logical_position == self.logical_range.start {
+            0
+        } else if logical_position.gap == StreamingObjectGap::no_objects()
+            && logical_position.byte_offset > self.logical_range.start.byte_offset
+            && logical_position.byte_offset < self.logical_range.end.byte_offset
+        {
+            usize::try_from(logical_position.byte_offset - self.logical_range.start.byte_offset)
+                .map_err(|_| StreamingLayoutError::Overflow(StreamingLayoutComponent::Maps))?
+        } else {
+            return Ok(None);
+        };
         let Some(mut position) = self.line.position_for_index(index, self.line_height) else {
             return Ok(None);
         };
@@ -64,10 +79,10 @@ impl StreamingTextFragment {
     /// The following fragment owns a shared logical boundary. An end-of-logical-line fragment owns
     /// its terminal boundary. Geometric points before/after this fragment return the corresponding
     /// non-owning variant, while an exact leading edge belongs to this fragment.
-    pub fn closest_logical_offset_for_position(
+    pub fn closest_logical_position_for_position(
         &self,
         mut position: Point<Pixels>,
-    ) -> Result<StreamingLayoutHit, StreamingLayoutError> {
+    ) -> Result<Option<StreamingLayoutHit>, StreamingLayoutError> {
         checked::validate_point(position, StreamingLayoutMetric::HitPosition)?;
         let start = self
             .maps
@@ -78,14 +93,10 @@ impl StreamingTextFragment {
             .last()
             .ok_or(StreamingLayoutError::InvalidSegment)?;
         if position == start.position {
-            return Ok(StreamingLayoutHit::Offset(self.logical_range.start));
+            return Ok(Some(StreamingLayoutHit::Gap(self.logical_range.start)));
         }
         if position == end.position {
-            return Ok(if self.owns_trailing_boundary {
-                StreamingLayoutHit::Offset(self.logical_range.end)
-            } else {
-                StreamingLayoutHit::AfterFragment
-            });
+            return Ok(None);
         }
         let start_block_end = checked::checked_pixel_add(
             start.position.y,
@@ -95,7 +106,7 @@ impl StreamingTextFragment {
         if position.y < start.position.y
             || (position.y < start_block_end && position.x < start.position.x)
         {
-            return Ok(StreamingLayoutHit::BeforeFragment);
+            return Ok(None);
         }
         let final_line_extent = if self.line.wrap_boundaries().is_empty() {
             self.first_line_block_extent
@@ -109,7 +120,7 @@ impl StreamingTextFragment {
         )?;
         if position.y >= end.position.y && position.y < end_block_end && position.x > end.position.x
         {
-            return Ok(StreamingLayoutHit::AfterFragment);
+            return Ok(None);
         }
         let last_block = self
             .maps
@@ -118,7 +129,7 @@ impl StreamingTextFragment {
             .max()
             .unwrap_or(self.origin.y);
         if position.y < self.origin.y {
-            return Ok(StreamingLayoutHit::BeforeFragment);
+            return Ok(None);
         }
         let block_end = checked::checked_pixel_add(
             last_block,
@@ -126,7 +137,7 @@ impl StreamingTextFragment {
             StreamingLayoutComponent::Maps,
         )?;
         if position.y >= block_end {
-            return Ok(StreamingLayoutHit::AfterFragment);
+            return Ok(None);
         }
         position =
             checked::checked_point_sub(position, self.origin, StreamingLayoutComponent::Maps)?;
@@ -154,19 +165,26 @@ impl StreamingTextFragment {
             .closest_index_for_position(position, self.line_height)
             .unwrap_or_else(|index| index);
         let index = checked::usize_to_u64(index, StreamingLayoutComponent::Maps)?;
-        let offset = checked::checked_u64_add(
-            self.logical_range.start,
+        let byte_offset = checked::checked_u64_add(
+            self.logical_range.start.byte_offset,
             index,
             StreamingLayoutComponent::Maps,
         )?;
-        if offset == self.logical_range.end && !self.owns_trailing_boundary {
-            Ok(StreamingLayoutHit::AfterFragment)
+        let logical_position = if byte_offset == self.logical_range.start.byte_offset {
+            self.logical_range.start
+        } else if byte_offset == self.logical_range.end.byte_offset {
+            self.logical_range.end
         } else {
-            Ok(StreamingLayoutHit::Offset(offset))
+            StreamingLayoutPosition::at(byte_offset)
+        };
+        if logical_position == self.logical_range.end {
+            Ok(None)
+        } else {
+            Ok(Some(StreamingLayoutHit::Gap(logical_position)))
         }
     }
 
-    /// Paints this fragment with the first line continuing at its admitted inline offset.
+    /// Paints this text fragment with the first line continuing at its admitted inline offset.
     pub fn paint(
         &self,
         session_origin: Point<Pixels>,
@@ -188,7 +206,7 @@ impl StreamingTextFragment {
         )
     }
 
-    /// Paints the fragment's decoration backgrounds with streaming placement.
+    /// Paints this text fragment's decoration backgrounds with streaming placement.
     pub fn paint_background(
         &self,
         session_origin: Point<Pixels>,
@@ -222,20 +240,22 @@ impl StreamingAtomFragment {
         self.baseline
     }
 
-    /// Returns the exact caret position for either logical boundary.
-    pub fn position_for_logical_offset(&self, offset: u64) -> Option<Point<Pixels>> {
-        match offset {
-            offset if offset == self.logical_range.start => Some(self.maps[0].position),
-            offset if offset == self.logical_range.end => Some(self.maps[1].position),
+    /// Returns the exact caret position for the atom's owned leading logical boundary.
+    pub fn position_for_logical_position(
+        &self,
+        position: StreamingLayoutPosition,
+    ) -> Option<Point<Pixels>> {
+        match position {
+            position if position == self.logical_range.start => Some(self.maps[0].position),
             _ => None,
         }
     }
 
     /// Hit-tests the atom with a deterministic midpoint split and trailing ownership rule.
-    pub fn closest_logical_offset_for_position(
+    pub fn closest_logical_position_for_position(
         &self,
         position: Point<Pixels>,
-    ) -> Result<StreamingLayoutHit, StreamingLayoutError> {
+    ) -> Result<Option<StreamingLayoutHit>, StreamingLayoutError> {
         checked::validate_point(position, StreamingLayoutMetric::HitPosition)?;
         let left = self.bounds.origin.x;
         let right = checked::checked_pixel_add(
@@ -249,10 +269,10 @@ impl StreamingAtomFragment {
             StreamingLayoutComponent::Maps,
         )?;
         if position.y < self.bounds.origin.y || position.x < left {
-            return Ok(StreamingLayoutHit::BeforeFragment);
+            return Ok(None);
         }
         if position.y >= bottom || position.x > right {
-            return Ok(StreamingLayoutHit::AfterFragment);
+            return Ok(None);
         }
         let midpoint = checked::checked_pixel_add(
             left,
@@ -264,11 +284,9 @@ impl StreamingAtomFragment {
             StreamingLayoutComponent::Maps,
         )?;
         if position.x < midpoint {
-            Ok(StreamingLayoutHit::Offset(self.logical_range.start))
-        } else if self.owns_trailing_boundary {
-            Ok(StreamingLayoutHit::Offset(self.logical_range.end))
+            Ok(Some(StreamingLayoutHit::Gap(self.logical_range.start)))
         } else {
-            Ok(StreamingLayoutHit::AfterFragment)
+            Ok(None)
         }
     }
 
