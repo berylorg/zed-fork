@@ -3,11 +3,12 @@ use x11rb::connection::RequestConnection;
 
 use crate::platform::blade::{BladeContext, BladeRenderer, BladeSurfaceConfig};
 use crate::{
-    AnyWindowHandle, Bounds, Decorations, DevicePixels, ForegroundExecutor, GpuSpecs, Modifiers,
-    Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow,
-    Point, PromptButton, PromptLevel, RequestFrameOptions, ResizeEdge, ScaledPixels, Scene, Size,
-    Tiling, WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea,
-    WindowDecorations, WindowKind, WindowParams, X11ClientStatePtr, px, size,
+    AnyWindowHandle, Bounds, Decorations, DevicePixels, ForegroundExecutor, GpuSpecs,
+    InitialWindowState, Modifiers, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput,
+    PlatformInputHandler, PlatformWindow, Point, PromptButton, PromptLevel, RequestFrameOptions,
+    ResizeEdge, ScaledPixels, Scene, Size, Tiling, WindowAppearance, WindowBackgroundAppearance,
+    WindowBounds, WindowControlArea, WindowDecorations, WindowKind, WindowParams,
+    X11ClientStatePtr, px, size,
 };
 
 use blade_graphics as gpu;
@@ -578,6 +579,27 @@ impl X11WindowState {
                 )?;
             }
 
+            let initial_window_state: &[u32] = match params.initial_state {
+                InitialWindowState::Windowed => &[][..],
+                InitialWindowState::Maximized => &[
+                    atoms._NET_WM_STATE_MAXIMIZED_VERT,
+                    atoms._NET_WM_STATE_MAXIMIZED_HORZ,
+                ],
+                InitialWindowState::Fullscreen => &[atoms._NET_WM_STATE_FULLSCREEN],
+            };
+            if !initial_window_state.is_empty() {
+                check_reply(
+                    || "X11 ChangeProperty32 setting initial _NET_WM_STATE failed.",
+                    xcb.change_property32(
+                        xproto::PropMode::REPLACE,
+                        x_window,
+                        atoms._NET_WM_STATE,
+                        xproto::AtomEnum::ATOM,
+                        initial_window_state,
+                    ),
+                )?;
+            }
+
             check_reply(
                 || "X11 ChangeProperty32 setting protocols failed.",
                 xcb.change_property32(
@@ -678,9 +700,9 @@ impl X11WindowState {
                 input_handler: None,
                 active: false,
                 hovered: false,
-                fullscreen: false,
-                maximized_vertical: false,
-                maximized_horizontal: false,
+                fullscreen: params.initial_state == InitialWindowState::Fullscreen,
+                maximized_vertical: params.initial_state == InitialWindowState::Maximized,
+                maximized_horizontal: params.initial_state == InitialWindowState::Maximized,
                 hidden: false,
                 appearance,
                 handle,
@@ -1375,6 +1397,10 @@ impl PlatformWindow for X11Window {
             self.0.xcb.map_window(self.0.x_window),
         )?;
         Ok(())
+    }
+
+    fn uses_native_initial_state(&self) -> bool {
+        true
     }
 
     fn set_background_appearance(&self, background_appearance: WindowBackgroundAppearance) {

@@ -25,8 +25,8 @@ use wayland_protocols::{
 use wayland_protocols_plasma::blur::client::org_kde_kwin_blur;
 
 use crate::{
-    AnyWindowHandle, Bounds, Decorations, Globals, GpuSpecs, Modifiers, Output, Pixels,
-    PlatformDisplay, PlatformInput, Point, PromptButton, PromptLevel, RequestFrameOptions,
+    AnyWindowHandle, Bounds, Decorations, Globals, GpuSpecs, InitialWindowState, Modifiers, Output,
+    Pixels, PlatformDisplay, PlatformInput, Point, PromptButton, PromptLevel, RequestFrameOptions,
     ResizeEdge, Size, Tiling, WaylandClientStatePtr, WindowAppearance, WindowBackgroundAppearance,
     WindowBounds, WindowControlArea, WindowControls, WindowDecorations, WindowParams, px, size,
 };
@@ -111,6 +111,7 @@ pub struct WaylandWindowState {
     hovered: bool,
     in_progress_configure: Option<InProgressConfigure>,
     resize_throttle: bool,
+    published: bool,
     in_progress_window_controls: Option<WindowControls>,
     window_controls: WindowControls,
     client_inset: Option<Pixels>,
@@ -157,6 +158,18 @@ impl WaylandWindowState {
             BladeRenderer::new(gpu_context, &raw_window, config)?
         };
 
+        let (fullscreen, maximized) = match options.initial_state {
+            InitialWindowState::Windowed => (false, false),
+            InitialWindowState::Maximized => {
+                toplevel.set_maximized();
+                (false, true)
+            }
+            InitialWindowState::Fullscreen => {
+                toplevel.set_fullscreen(None);
+                (true, false)
+            }
+        };
+
         Ok(Self {
             xdg_surface,
             acknowledged_first_configure: false,
@@ -175,12 +188,13 @@ impl WaylandWindowState {
             input_handler: None,
             decorations: WindowDecorations::Client,
             background_appearance: WindowBackgroundAppearance::Opaque,
-            fullscreen: false,
-            maximized: false,
+            fullscreen,
+            maximized,
             tiling: Tiling::default(),
             window_bounds: options.bounds,
             in_progress_configure: None,
             resize_throttle: false,
+            published: false,
             client,
             appearance,
             handle,
@@ -329,9 +343,6 @@ impl WaylandWindow {
             callbacks: Rc::new(RefCell::new(Callbacks::default())),
         });
 
-        // Kick things off
-        surface.commit();
-
         Ok((this, surface.id()))
     }
 }
@@ -354,6 +365,10 @@ impl WaylandWindowStatePtr {
     }
 
     pub fn frame(&self) {
+        self.request_frame(Default::default());
+    }
+
+    fn request_frame(&self, options: RequestFrameOptions) {
         let mut state = self.state.borrow_mut();
         state.surface.frame(&state.globals.qh, state.surface.id());
         state.resize_throttle = false;
@@ -361,7 +376,7 @@ impl WaylandWindowStatePtr {
 
         let mut cb = self.callbacks.borrow_mut();
         if let Some(fun) = cb.request_frame.as_mut() {
-            fun(Default::default());
+            fun(options);
         }
     }
 
@@ -430,11 +445,14 @@ impl WaylandWindowStatePtr {
                 window_geometry.size.height,
             );
 
-            let request_frame_callback = !state.acknowledged_first_configure;
+            let request_frame_callback = state.published && !state.acknowledged_first_configure;
             if request_frame_callback {
                 state.acknowledged_first_configure = true;
                 drop(state);
-                self.frame();
+                self.request_frame(RequestFrameOptions {
+                    require_presentation: true,
+                    force_render: true,
+                });
             }
         }
     }
@@ -946,6 +964,20 @@ impl PlatformWindow for WaylandWindow {
         state.app_id = Some(app_id.to_owned());
     }
 
+    fn map_window(&mut self) -> anyhow::Result<()> {
+        let mut state = self.borrow_mut();
+        if state.published {
+            return Ok(());
+        }
+        state.published = true;
+        state.surface.commit();
+        Ok(())
+    }
+
+    fn uses_native_initial_state(&self) -> bool {
+        true
+    }
+
     fn set_background_appearance(&self, background_appearance: WindowBackgroundAppearance) {
         let mut state = self.borrow_mut();
         state.background_appearance = background_appearance;
@@ -1019,12 +1051,16 @@ impl PlatformWindow for WaylandWindow {
 
     fn draw(&self, scene: &Scene) {
         let mut state = self.borrow_mut();
-        state.renderer.draw(scene);
+        if state.published {
+            state.renderer.draw(scene);
+        }
     }
 
     fn completed_frame(&self) {
         let state = self.borrow();
-        state.surface.commit();
+        if state.published {
+            state.surface.commit();
+        }
     }
 
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {

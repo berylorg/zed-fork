@@ -30,6 +30,23 @@ pub struct TestAppContext {
     on_quit: Rc<RefCell<Vec<Box<dyn FnOnce() + 'static>>>>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[doc(hidden)]
+pub struct TestWindowVisibility {
+    #[doc(hidden)]
+    pub is_visible: bool,
+    #[doc(hidden)]
+    pub visibility_change_count: usize,
+    #[doc(hidden)]
+    pub is_active: bool,
+    #[doc(hidden)]
+    pub activation_change_count: usize,
+    #[doc(hidden)]
+    pub is_minimized: bool,
+    #[doc(hidden)]
+    pub minimize_change_count: usize,
+}
+
 impl AppContext for TestAppContext {
     type Result<T> = T;
 
@@ -338,6 +355,28 @@ impl TestAppContext {
     /// Simulates the user resizing the window to the new size.
     pub fn simulate_window_resize(&self, window_handle: AnyWindowHandle, size: Size<Pixels>) {
         self.test_window(window_handle).simulate_resize(size);
+    }
+
+    #[doc(hidden)]
+    pub fn window_visibility(&self, window_handle: AnyWindowHandle) -> TestWindowVisibility {
+        let window = self.test_window(window_handle);
+        let state = window.0.lock();
+        TestWindowVisibility {
+            is_visible: state.visible,
+            visibility_change_count: state.visibility_change_count,
+            is_active: state.active,
+            activation_change_count: state.activation_change_count,
+            is_minimized: state.minimized,
+            minimize_change_count: state.minimize_change_count,
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn fail_next_window_visibility_change(&self, window_handle: AnyWindowHandle) {
+        self.test_window(window_handle)
+            .0
+            .lock()
+            .fail_next_visibility_change = true;
     }
 
     /// Causes the given sources to be returned if the application queries for screen

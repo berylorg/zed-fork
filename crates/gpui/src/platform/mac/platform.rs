@@ -633,7 +633,7 @@ impl Platform for MacPlatform {
             options,
             self.foreground_executor(),
             renderer_context,
-        )))
+        )?))
     }
 
     fn window_appearance(&self) -> WindowAppearance {

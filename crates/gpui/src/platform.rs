@@ -1032,6 +1032,9 @@ pub(crate) trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
         WindowControls::default()
     }
     fn set_client_inset(&self, _inset: Pixels) {}
+    fn uses_native_initial_state(&self) -> bool {
+        false
+    }
     fn gpu_specs(&self) -> Option<GpuSpecs>;
 
     fn update_ime_position(&self, _bounds: Bounds<Pixels>);
@@ -1668,6 +1671,9 @@ pub struct WindowOptions {
 pub(crate) struct WindowParams {
     pub bounds: Bounds<Pixels>,
 
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub initial_state: InitialWindowState,
+
     /// The titlebar configuration of the window
     #[cfg_attr(feature = "wayland", allow(dead_code))]
     pub titlebar: Option<TitlebarOptions>,
@@ -1703,6 +1709,13 @@ pub(crate) struct WindowParams {
     pub window_min_size: Option<Size<Pixels>>,
     #[cfg(target_os = "macos")]
     pub tabbing_identifier: Option<String>,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub(crate) enum InitialWindowState {
+    Windowed,
+    Maximized,
+    Fullscreen,
 }
 
 /// Represents the status of how a window should be opened.

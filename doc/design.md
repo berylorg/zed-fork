@@ -10,6 +10,14 @@ Maintain a narrow Beryl-oriented fork of upstream Zed that carries targeted GPUI
 
 # Decisions
 
+## Documentation Authority
+
+- This root design owns the bounded fork scope and reusable GPUI public-boundary decisions carried
+  specifically for Beryl. It does not govern the full upstream Zed architecture.
+- [Hidden-window first publication](features/hidden-window-first-publication/design.md) owns the
+  consumer-visible behavior of constructing a native window hidden and explicitly publishing that
+  same window as its first visible surface.
+
 ## Fork Scope
 
 The fork exists for targeted GPUI changes needed by Beryl and should remain easy to compare with upstream Zed.
@@ -167,3 +175,30 @@ GPUI-owned HTTP client integration is optional in this fork. Default GPUI builds
 Consumers that enable the GPUI HTTP client feature retain the GPUI HTTP client boundary. Code that only needs URL parsing or HTTP status constants should use lighter dependencies instead of requiring the GPUI HTTP client stack.
 
 Avoiding `ring` by default avoids the LLVM-linked native build cost that Beryl does not need when it does not use GPUI HTTP APIs.
+
+## Hidden-Window First-Publication Boundary
+
+The fork exposes one app-neutral GPUI operation that publishes an already-created hidden window
+without changing its GPUI identity, native-window identity, root entity, renderer ownership,
+callbacks, or configured properties. Drawing or updating the window does not implicitly publish
+it. Publication remains separate from activation and focus. It performs only the platform-required
+initial insertion into visible stacking or tab order and performs no additional raise or reorder.
+The initially windowed, maximized, or fullscreen native state is fixed by construction options;
+maximize and fullscreen requests remain inert until first publication, then use ordinary behavior.
+
+Every supported native backend implements the feature-owned first-publication behavior through one
+equivalent platform boundary. The public operation defines hidden, already-published, failed, and
+closed-handle outcomes without adding a general post-publication visibility toggle.
+
+Hidden fullscreen construction is unsupported on macOS because AppKit cannot establish that native
+state without a visible transition. GPUI rejects that request before native exposure; hidden
+windowed and maximized construction and ordinary immediate fullscreen behavior remain supported.
+
+# Engineering Rigor
+
+Profile: `production-application/v1`
+
+Modifiers: none
+
+This declaration governs only the fork and GPUI boundary decisions in this document, not unrelated
+upstream Zed architecture.

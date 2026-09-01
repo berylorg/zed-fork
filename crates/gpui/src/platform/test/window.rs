@@ -2,11 +2,11 @@ use crate::{
     AnyWindowHandle, AtlasDiagnosticSnapshot, AtlasImageTileDiagnostic, AtlasKey,
     AtlasKindDiagnostic, AtlasTextureId, AtlasTextureKind, AtlasTile, Bounds, DispatchEventResult,
     GpuSpecs, ImageResource, ImageResourceDiagnostic, ImageResourceDiagnosticSnapshot,
-    ImageResourceId, Pixels, PlatformAtlas, PlatformDisplay, PlatformImageResources, PlatformInput,
-    PlatformInputHandler, PlatformRendererDiagnosticSnapshot, PlatformWindow, Point,
-    PreparedImageUpload, PromptButton, RequestFrameOptions, Size, TestPlatform, TileId,
-    WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowParams,
-    image_resource_bytes,
+    ImageResourceId, InitialWindowState, Pixels, PlatformAtlas, PlatformDisplay,
+    PlatformImageResources, PlatformInput, PlatformInputHandler,
+    PlatformRendererDiagnosticSnapshot, PlatformWindow, Point, PreparedImageUpload, PromptButton,
+    RequestFrameOptions, Size, TestPlatform, TileId, WindowAppearance, WindowBackgroundAppearance,
+    WindowBounds, WindowControlArea, WindowParams, image_resource_bytes,
 };
 use collections::HashMap;
 use parking_lot::Mutex;
@@ -33,7 +33,22 @@ pub(crate) struct TestWindowState {
     resize_callback: Option<Box<dyn FnMut(Size<Pixels>, f32)>>,
     moved_callback: Option<Box<dyn FnMut()>>,
     input_handler: Option<PlatformInputHandler>,
-    is_fullscreen: bool,
+    pub(crate) window_state: TestWindowStateKind,
+    pub(crate) visible: bool,
+    pub(crate) visibility_change_count: usize,
+    pub(crate) fail_next_visibility_change: bool,
+    pub(crate) active: bool,
+    pub(crate) activation_change_count: usize,
+    pub(crate) minimized: bool,
+    pub(crate) minimize_change_count: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[doc(hidden)]
+pub enum TestWindowStateKind {
+    Windowed,
+    Maximized,
+    Fullscreen,
 }
 
 #[derive(Clone)]
@@ -62,10 +77,11 @@ impl TestWindow {
         platform: Weak<TestPlatform>,
         display: Rc<dyn PlatformDisplay>,
     ) -> Self {
-        Self(Rc::new(Mutex::new(TestWindowState {
+        let active = params.show && params.focus;
+        let window = Self(Rc::new(Mutex::new(TestWindowState {
             bounds: params.bounds,
             display,
-            platform,
+            platform: platform.clone(),
             handle,
             sprite_atlas: Arc::new(TestAtlas::new()),
             image_resources: Arc::new(TestImageResources::new()),
@@ -79,8 +95,23 @@ impl TestWindow {
             resize_callback: None,
             moved_callback: None,
             input_handler: None,
-            is_fullscreen: false,
-        })))
+            window_state: match params.initial_state {
+                InitialWindowState::Windowed => TestWindowStateKind::Windowed,
+                InitialWindowState::Maximized => TestWindowStateKind::Maximized,
+                InitialWindowState::Fullscreen => TestWindowStateKind::Fullscreen,
+            },
+            visible: params.show,
+            visibility_change_count: 0,
+            fail_next_visibility_change: false,
+            active,
+            activation_change_count: usize::from(active),
+            minimized: false,
+            minimize_change_count: 0,
+        })));
+        if active && let Some(platform) = platform.upgrade() {
+            platform.set_active_window(Some(window.clone()));
+        }
+        window
     }
 
     pub fn simulate_resize(&mut self, size: Size<Pixels>) {
@@ -96,6 +127,7 @@ impl TestWindow {
     }
 
     pub(crate) fn simulate_active_status_change(&self, active: bool) {
+        self.set_active_state(active);
         let mut lock = self.0.lock();
         let Some(mut callback) = lock.active_status_change_callback.take() else {
             return;
@@ -103,6 +135,14 @@ impl TestWindow {
         drop(lock);
         callback(active);
         self.0.lock().active_status_change_callback = Some(callback);
+    }
+
+    pub(crate) fn set_active_state(&self, active: bool) {
+        let mut lock = self.0.lock();
+        if lock.active != active {
+            lock.active = active;
+            lock.activation_change_count += 1;
+        }
     }
 
     pub fn simulate_input(&mut self, event: PlatformInput) -> bool {
@@ -123,11 +163,16 @@ impl PlatformWindow for TestWindow {
     }
 
     fn window_bounds(&self) -> WindowBounds {
-        WindowBounds::Windowed(self.bounds())
+        let window_state = self.0.lock().window_state;
+        match window_state {
+            TestWindowStateKind::Windowed => WindowBounds::Windowed(self.bounds()),
+            TestWindowStateKind::Maximized => WindowBounds::Maximized(self.bounds()),
+            TestWindowStateKind::Fullscreen => WindowBounds::Fullscreen(self.bounds()),
+        }
     }
 
     fn is_maximized(&self) -> bool {
-        false
+        self.0.lock().window_state == TestWindowStateKind::Maximized
     }
 
     fn content_size(&self) -> Size<Pixels> {
@@ -189,16 +234,12 @@ impl PlatformWindow for TestWindow {
     }
 
     fn activate(&self) {
-        self.0
-            .lock()
-            .platform
-            .upgrade()
-            .unwrap()
-            .set_active_window(Some(self.clone()))
+        let platform = self.0.lock().platform.upgrade().unwrap();
+        platform.set_active_window(Some(self.clone()))
     }
 
     fn is_active(&self) -> bool {
-        false
+        self.0.lock().active
     }
 
     fn is_hovered(&self) -> bool {
@@ -211,6 +252,21 @@ impl PlatformWindow for TestWindow {
 
     fn set_app_id(&mut self, _app_id: &str) {}
 
+    fn map_window(&mut self) -> anyhow::Result<()> {
+        let mut lock = self.0.lock();
+        if lock.fail_next_visibility_change {
+            lock.fail_next_visibility_change = false;
+            anyhow::bail!("test visibility transition failed")
+        }
+        lock.visible = true;
+        lock.visibility_change_count += 1;
+        Ok(())
+    }
+
+    fn uses_native_initial_state(&self) -> bool {
+        true
+    }
+
     fn set_background_appearance(&self, _background: WindowBackgroundAppearance) {}
 
     fn set_edited(&mut self, edited: bool) {
@@ -222,20 +278,31 @@ impl PlatformWindow for TestWindow {
     }
 
     fn minimize(&self) {
-        unimplemented!()
+        let mut lock = self.0.lock();
+        lock.minimized = true;
+        lock.minimize_change_count += 1;
     }
 
     fn zoom(&self) {
-        unimplemented!()
+        let mut lock = self.0.lock();
+        lock.window_state = if lock.window_state == TestWindowStateKind::Maximized {
+            TestWindowStateKind::Windowed
+        } else {
+            TestWindowStateKind::Maximized
+        };
     }
 
     fn toggle_fullscreen(&self) {
         let mut lock = self.0.lock();
-        lock.is_fullscreen = !lock.is_fullscreen;
+        lock.window_state = if lock.window_state == TestWindowStateKind::Fullscreen {
+            TestWindowStateKind::Windowed
+        } else {
+            TestWindowStateKind::Fullscreen
+        };
     }
 
     fn is_fullscreen(&self) -> bool {
-        self.0.lock().is_fullscreen
+        self.0.lock().window_state == TestWindowStateKind::Fullscreen
     }
 
     fn on_request_frame(&self, _callback: Box<dyn FnMut(RequestFrameOptions)>) {}

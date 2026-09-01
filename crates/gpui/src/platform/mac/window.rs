@@ -1,12 +1,13 @@
 use super::{BoolExt, MacDisplay, NSRange, NSStringExt, ns_string, renderer};
 use crate::{
     AnyWindowHandle, Bounds, Capslock, DisplayLink, ExternalPaths, FileDropEvent,
-    ForegroundExecutor, KeyDownEvent, Keystroke, Modifiers, ModifiersChangedEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, PlatformAtlas, PlatformDisplay,
-    PlatformInput, PlatformWindow, Point, PromptButton, PromptLevel, RequestFrameOptions,
-    SharedString, Size, SystemWindowTab, Timer, WindowAppearance, WindowBackgroundAppearance,
-    WindowBounds, WindowControlArea, WindowKind, WindowParams, dispatch_get_main_queue,
-    dispatch_sys::dispatch_async_f, platform::PlatformInputHandler, point, px, size,
+    ForegroundExecutor, InitialWindowState, KeyDownEvent, Keystroke, Modifiers,
+    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
+    PlatformAtlas, PlatformDisplay, PlatformInput, PlatformWindow, Point, PromptButton,
+    PromptLevel, RequestFrameOptions, SharedString, Size, SystemWindowTab, Timer, WindowAppearance,
+    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowKind, WindowParams,
+    dispatch_get_main_queue, dispatch_sys::dispatch_async_f, platform::PlatformInputHandler, point,
+    px, size,
 };
 use block::ConcreteBlock;
 use cocoa::{
@@ -419,6 +420,7 @@ struct MacWindowState {
     select_previous_tab_callback: Option<Box<dyn FnMut()>>,
     toggle_tab_bar_callback: Option<Box<dyn FnMut()>>,
     activated_least_once: bool,
+    allows_automatic_window_tabbing: bool,
 }
 
 impl MacWindowState {
@@ -568,6 +570,49 @@ unsafe impl Send for MacWindowState {}
 pub(crate) struct MacWindow(Arc<Mutex<MacWindowState>>);
 
 impl MacWindow {
+    fn add_to_automatic_tab_group(
+        native_window: id,
+        allows_automatic_window_tabbing: bool,
+        order_front_after_adding_tab: bool,
+    ) -> bool {
+        if !allows_automatic_window_tabbing {
+            return false;
+        }
+
+        unsafe {
+            let app = NSApplication::sharedApplication(nil);
+            let main_window: id = msg_send![app, mainWindow];
+            if main_window.is_null() || main_window == native_window {
+                return false;
+            }
+
+            let main_window_is_fullscreen = main_window
+                .styleMask()
+                .contains(NSWindowStyleMask::NSFullScreenWindowMask);
+            let user_tabbing_preference =
+                Self::get_user_tabbing_preference().unwrap_or(UserTabbingPreference::InFullScreen);
+            let should_add_as_tab = user_tabbing_preference == UserTabbingPreference::Always
+                || user_tabbing_preference == UserTabbingPreference::InFullScreen
+                    && main_window_is_fullscreen;
+
+            if should_add_as_tab {
+                let main_window_can_tab: BOOL =
+                    msg_send![main_window, respondsToSelector: sel!(addTabbedWindow:ordered:)];
+                let main_window_visible: BOOL = msg_send![main_window, isVisible];
+
+                if main_window_can_tab == YES && main_window_visible == YES {
+                    let _: () = msg_send![main_window, addTabbedWindow: native_window ordered: NSWindowOrderingMode::NSWindowAbove];
+                    if order_front_after_adding_tab && !main_window_is_fullscreen {
+                        native_window.orderFront_(nil);
+                    }
+
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     pub fn open(
         handle: AnyWindowHandle,
         WindowParams {
@@ -582,10 +627,15 @@ impl MacWindow {
             display_id,
             window_min_size,
             tabbing_identifier,
+            initial_state,
         }: WindowParams,
         executor: ForegroundExecutor,
         renderer_context: renderer::Context,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
+        if !show && initial_state == InitialWindowState::Fullscreen {
+            anyhow::bail!("hidden fullscreen windows are unsupported on macOS");
+        }
+
         unsafe {
             let pool = NSAutoreleasePool::new(nil);
 
@@ -725,6 +775,7 @@ impl MacWindow {
                 select_previous_tab_callback: None,
                 toggle_tab_bar_callback: None,
                 activated_least_once: false,
+                allows_automatic_window_tabbing,
             })));
 
             (*native_window).set_ivar(
@@ -814,42 +865,18 @@ impl MacWindow {
                 }
             }
 
-            let app = NSApplication::sharedApplication(nil);
-            let main_window: id = msg_send![app, mainWindow];
-            if allows_automatic_window_tabbing
-                && !main_window.is_null()
-                && main_window != native_window
-            {
-                let main_window_is_fullscreen = main_window
-                    .styleMask()
-                    .contains(NSWindowStyleMask::NSFullScreenWindowMask);
-                let user_tabbing_preference = Self::get_user_tabbing_preference()
-                    .unwrap_or(UserTabbingPreference::InFullScreen);
-                let should_add_as_tab = user_tabbing_preference == UserTabbingPreference::Always
-                    || user_tabbing_preference == UserTabbingPreference::InFullScreen
-                        && main_window_is_fullscreen;
+            if show {
+                Self::add_to_automatic_tab_group(
+                    native_window,
+                    allows_automatic_window_tabbing,
+                    true,
+                );
 
-                if should_add_as_tab {
-                    let main_window_can_tab: BOOL =
-                        msg_send![main_window, respondsToSelector: sel!(addTabbedWindow:ordered:)];
-                    let main_window_visible: BOOL = msg_send![main_window, isVisible];
-
-                    if main_window_can_tab == YES && main_window_visible == YES {
-                        let _: () = msg_send![main_window, addTabbedWindow: native_window ordered: NSWindowOrderingMode::NSWindowAbove];
-
-                        // Ensure the window is visible immediately after adding the tab, since the tab bar is updated with a new entry at this point.
-                        // Note: Calling orderFront here can break fullscreen mode (makes fullscreen windows exit fullscreen), so only do this if the main window is not fullscreen.
-                        if !main_window_is_fullscreen {
-                            let _: () = msg_send![native_window, orderFront: nil];
-                        }
-                    }
+                if focus {
+                    native_window.makeKeyAndOrderFront_(nil);
+                } else {
+                    native_window.orderFront_(nil);
                 }
-            }
-
-            if focus && show {
-                native_window.makeKeyAndOrderFront_(nil);
-            } else if show {
-                native_window.orderFront_(nil);
             }
 
             // Set the initial position of the window to the specified origin.
@@ -859,9 +886,15 @@ impl MacWindow {
             NSWindow::setFrameTopLeftPoint_(native_window, window_rect.origin);
             window.0.lock().move_traffic_light();
 
+            match initial_state {
+                InitialWindowState::Windowed => {}
+                InitialWindowState::Maximized => native_window.zoom_(nil),
+                InitialWindowState::Fullscreen => native_window.toggleFullScreen_(nil),
+            }
+
             pool.drain();
 
-            window
+            Ok(window)
         }
     }
 
@@ -1253,6 +1286,29 @@ impl PlatformWindow for MacWindow {
     }
 
     fn set_app_id(&mut self, _app_id: &str) {}
+
+    fn map_window(&mut self) -> anyhow::Result<()> {
+        unsafe {
+            let state = self.0.lock();
+            let native_window = state.native_window;
+            let allows_automatic_window_tabbing = state.allows_automatic_window_tabbing;
+            drop(state);
+            if native_window.isVisible() == NO {
+                if !Self::add_to_automatic_tab_group(
+                    native_window,
+                    allows_automatic_window_tabbing,
+                    false,
+                ) {
+                    native_window.orderFront_(nil);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn uses_native_initial_state(&self) -> bool {
+        true
+    }
 
     fn set_background_appearance(&self, background_appearance: WindowBackgroundAppearance) {
         let mut this = self.0.as_ref().lock();

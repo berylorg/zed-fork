@@ -235,67 +235,64 @@ impl WindowsWindowInner {
         }))
     }
 
+    fn set_fullscreen(&self) -> Result<()> {
+        let mut lock = self.state.borrow_mut();
+        let StyleAndBounds {
+            style,
+            x,
+            y,
+            cx,
+            cy,
+        } = if let Some(state) = lock.fullscreen.take() {
+            state
+        } else {
+            let (window_bounds, _) = lock.calculate_window_bounds();
+            lock.fullscreen_restore_bounds = window_bounds;
+            let style = WINDOW_STYLE(unsafe { get_window_long(self.hwnd, GWL_STYLE) } as _);
+            let mut rc = RECT::default();
+            unsafe { GetWindowRect(self.hwnd, &mut rc) }.context("failed to get window rect")?;
+            let _ = lock.fullscreen.insert(StyleAndBounds {
+                style,
+                x: rc.left,
+                y: rc.top,
+                cx: rc.right - rc.left,
+                cy: rc.bottom - rc.top,
+            });
+            let style = style
+                & !(WS_THICKFRAME | WS_SYSMENU | WS_MAXIMIZEBOX | WS_MINIMIZEBOX | WS_CAPTION);
+            let physical_bounds = lock.display.physical_bounds();
+            StyleAndBounds {
+                style,
+                x: physical_bounds.left().0,
+                y: physical_bounds.top().0,
+                cx: physical_bounds.size.width.0,
+                cy: physical_bounds.size.height.0,
+            }
+        };
+        drop(lock);
+        unsafe { set_window_long(self.hwnd, GWL_STYLE, style.0 as isize) };
+        unsafe {
+            SetWindowPos(
+                self.hwnd,
+                None,
+                x,
+                y,
+                cx,
+                cy,
+                SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_NOZORDER,
+            )
+        }
+        .context("failed to set fullscreen window bounds")?;
+        Ok(())
+    }
+
     fn toggle_fullscreen(&self) {
         let Some(this) = self.this.upgrade() else {
             log::error!("Unable to toggle fullscreen: window has been dropped");
             return;
         };
         self.executor
-            .spawn(async move {
-                let mut lock = this.state.borrow_mut();
-                let StyleAndBounds {
-                    style,
-                    x,
-                    y,
-                    cx,
-                    cy,
-                } = if let Some(state) = lock.fullscreen.take() {
-                    state
-                } else {
-                    let (window_bounds, _) = lock.calculate_window_bounds();
-                    lock.fullscreen_restore_bounds = window_bounds;
-                    let style = WINDOW_STYLE(unsafe { get_window_long(this.hwnd, GWL_STYLE) } as _);
-                    let mut rc = RECT::default();
-                    unsafe { GetWindowRect(this.hwnd, &mut rc) }
-                        .context("failed to get window rect")
-                        .log_err();
-                    let _ = lock.fullscreen.insert(StyleAndBounds {
-                        style,
-                        x: rc.left,
-                        y: rc.top,
-                        cx: rc.right - rc.left,
-                        cy: rc.bottom - rc.top,
-                    });
-                    let style = style
-                        & !(WS_THICKFRAME
-                            | WS_SYSMENU
-                            | WS_MAXIMIZEBOX
-                            | WS_MINIMIZEBOX
-                            | WS_CAPTION);
-                    let physical_bounds = lock.display.physical_bounds();
-                    StyleAndBounds {
-                        style,
-                        x: physical_bounds.left().0,
-                        y: physical_bounds.top().0,
-                        cx: physical_bounds.size.width.0,
-                        cy: physical_bounds.size.height.0,
-                    }
-                };
-                drop(lock);
-                unsafe { set_window_long(this.hwnd, GWL_STYLE, style.0 as isize) };
-                unsafe {
-                    SetWindowPos(
-                        this.hwnd,
-                        None,
-                        x,
-                        y,
-                        cx,
-                        cy,
-                        SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_NOZORDER,
-                    )
-                }
-                .log_err();
-            })
+            .spawn(async move { this.set_fullscreen().log_err() })
             .detach();
     }
 
@@ -303,23 +300,22 @@ impl WindowsWindowInner {
         let Some(open_status) = self.state.borrow_mut().initial_placement.take() else {
             return Ok(());
         };
-        match open_status.state {
-            WindowOpenState::Maximized => unsafe {
-                SetWindowPlacement(self.hwnd, &open_status.placement)
-                    .context("failed to set window placement")?;
-                ShowWindowAsync(self.hwnd, SW_MAXIMIZE).ok()?;
-            },
-            WindowOpenState::Fullscreen => {
-                unsafe {
-                    SetWindowPlacement(self.hwnd, &open_status.placement)
-                        .context("failed to set window placement")?
-                };
-                self.toggle_fullscreen();
-            }
-            WindowOpenState::Windowed => unsafe {
-                SetWindowPlacement(self.hwnd, &open_status.placement)
-                    .context("failed to set window placement")?;
-            },
+        let _ = &open_status.state;
+        let result = unsafe {
+            SetWindowPos(
+                self.hwnd,
+                None,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER | SWP_SHOWWINDOW,
+            )
+        }
+        .context("failed to show window without activation");
+        if let Err(error) = result {
+            self.state.borrow_mut().initial_placement = Some(open_status);
+            return Err(error);
         }
         Ok(())
     }
@@ -391,7 +387,7 @@ impl WindowsWindow {
                 .unwrap_or(""),
         );
 
-        let (mut dwexstyle, dwstyle) = if params.kind == WindowKind::PopUp {
+        let (mut dwexstyle, mut dwstyle) = if params.kind == WindowKind::PopUp {
             (WS_EX_TOOLWINDOW, WINDOW_STYLE(0x0))
         } else {
             let mut dwstyle = WS_SYSMENU;
@@ -408,6 +404,9 @@ impl WindowsWindow {
         };
         if !disable_direct_composition {
             dwexstyle |= WS_EX_NOREDIRECTIONBITMAP;
+        }
+        if params.initial_state == InitialWindowState::Maximized {
+            dwstyle |= WS_MAXIMIZE;
         }
 
         let hinstance = get_module_handle();
@@ -468,13 +467,30 @@ impl WindowsWindow {
             this.state.borrow().scale_factor,
             this.state.borrow().border_offset,
         )?;
+        let state = match params.initial_state {
+            InitialWindowState::Maximized => WindowOpenState::Maximized,
+            InitialWindowState::Fullscreen => WindowOpenState::Fullscreen,
+            InitialWindowState::Windowed => WindowOpenState::Windowed,
+        };
         if params.show {
-            unsafe { SetWindowPlacement(hwnd, &placement)? };
+            let mut shown_placement = placement;
+            if matches!(state, WindowOpenState::Maximized) {
+                shown_placement.showCmd = SW_SHOWMAXIMIZED.0 as u32;
+            }
+            unsafe { SetWindowPlacement(hwnd, &shown_placement) }
+                .context("failed to show initial window")?;
+            if matches!(state, WindowOpenState::Fullscreen) {
+                this.toggle_fullscreen();
+            }
         } else {
-            this.state.borrow_mut().initial_placement = Some(WindowOpenStatus {
-                placement,
-                state: WindowOpenState::Windowed,
-            });
+            let mut hidden_placement = placement;
+            hidden_placement.showCmd = SW_HIDE.0 as u32;
+            unsafe { SetWindowPlacement(hwnd, &hidden_placement) }
+                .context("failed to prepare hidden window placement")?;
+            if matches!(state, WindowOpenState::Fullscreen) {
+                this.set_fullscreen()?;
+            }
+            this.state.borrow_mut().initial_placement = Some(WindowOpenStatus { state });
         }
 
         Ok(Self(this))
@@ -753,6 +769,18 @@ impl PlatformWindow for WindowsWindow {
         unsafe { SetWindowTextW(self.0.hwnd, &HSTRING::from(title)) }
             .inspect_err(|e| log::error!("Set title failed: {e}"))
             .ok();
+    }
+
+    fn map_window(&mut self) -> anyhow::Result<()> {
+        if self.0.state.borrow().initial_placement.is_none() {
+            return Ok(());
+        }
+        self.0.set_window_placement()?;
+        Ok(())
+    }
+
+    fn uses_native_initial_state(&self) -> bool {
+        true
     }
 
     fn set_background_appearance(&self, background_appearance: WindowBackgroundAppearance) {
@@ -1142,10 +1170,10 @@ impl WindowBorderOffset {
 }
 
 struct WindowOpenStatus {
-    placement: WINDOWPLACEMENT,
     state: WindowOpenState,
 }
 
+#[derive(Copy, Clone)]
 enum WindowOpenState {
     Maximized,
     Fullscreen,

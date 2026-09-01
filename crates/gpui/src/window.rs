@@ -7,8 +7,8 @@ use crate::{
     DevicePixels, DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId, Edges, Effect,
     Entity, EntityId, EventEmitter, FileDropEvent, FontId, Global, GlobalElementId, GlyphId,
     GpuSpecs, Hsla, ImageRenderRequest, ImageRenderSource, ImageResource, ImageResourceId,
-    ImageSourceId, ImageSprite, InputHandler, IsZero, KeyBinding, KeyContext, KeyDownEvent,
-    KeyEvent, Keystroke, KeystrokeEvent, LayoutId, LineLayoutIndex, Modifiers,
+    ImageSourceId, ImageSprite, InitialWindowState, InputHandler, IsZero, KeyBinding, KeyContext,
+    KeyDownEvent, KeyEvent, Keystroke, KeystrokeEvent, LayoutId, LineLayoutIndex, Modifiers,
     ModifiersChangedEvent, MonochromeSprite, MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent,
     Path, Pixels, PlatformAtlas, PlatformDisplay, PlatformImageResources, PlatformInput,
     PlatformInputHandler, PlatformWindow, Point, PolychromeSprite, PromptButton, PromptLevel, Quad,
@@ -844,6 +844,7 @@ pub struct Window {
     pub(crate) handle: AnyWindowHandle,
     pub(crate) invalidator: WindowInvalidator,
     pub(crate) removed: bool,
+    published: bool,
     pub(crate) platform_window: Box<dyn PlatformWindow>,
     display_id: Option<DisplayId>,
     sprite_atlas: Arc<dyn PlatformAtlas>,
@@ -1041,10 +1042,16 @@ impl Window {
         let bounds = window_bounds
             .map(|bounds| bounds.get_bounds())
             .unwrap_or_else(|| default_bounds(display_id, cx));
+        let initial_state = match window_bounds {
+            Some(WindowBounds::Maximized(_)) => InitialWindowState::Maximized,
+            Some(WindowBounds::Fullscreen(_)) => InitialWindowState::Fullscreen,
+            Some(WindowBounds::Windowed(_)) | None => InitialWindowState::Windowed,
+        };
         let mut platform_window = cx.platform.open_window(
             handle,
             WindowParams {
                 bounds,
+                initial_state,
                 titlebar,
                 kind,
                 is_movable,
@@ -1086,7 +1093,9 @@ impl Window {
             .request_decorations(window_decorations.unwrap_or(WindowDecorations::Server));
         platform_window.set_background_appearance(window_background);
 
-        if let Some(ref window_open_state) = window_bounds {
+        if !platform_window.uses_native_initial_state()
+            && let Some(ref window_open_state) = window_bounds
+        {
             match window_open_state {
                 WindowBounds::Fullscreen(_) => platform_window.toggle_fullscreen(),
                 WindowBounds::Maximized(_) => platform_window.zoom(),
@@ -1291,12 +1300,15 @@ impl Window {
             platform_window.set_app_id(&app_id);
         }
 
-        platform_window.map_window().unwrap();
+        if show {
+            platform_window.map_window()?;
+        }
 
         Ok(Window {
             handle,
             invalidator,
             removed: false,
+            published: show,
             platform_window,
             display_id,
             sprite_atlas,
@@ -1832,7 +1844,9 @@ impl Window {
 
     /// Toggle zoom on the window.
     pub fn zoom_window(&self) {
-        self.platform_window.zoom();
+        if self.published {
+            self.platform_window.zoom();
+        }
     }
 
     /// Opens the native title bar context menu, useful when implementing client side decorations (Wayland and X11)
@@ -1995,6 +2009,33 @@ impl Window {
     /// The current state of the keyboard's capslock
     pub fn capslock(&self) -> Capslock {
         self.capslock
+    }
+
+    #[doc(hidden)]
+    pub fn publish(
+        &mut self,
+        #[cfg_attr(not(target_os = "macos"), allow(unused_variables))] cx: &mut App,
+    ) -> Result<()> {
+        if self.removed {
+            anyhow::bail!("cannot publish a removed window");
+        }
+        if !self.published {
+            self.platform_window.map_window()?;
+            self.published = true;
+            #[cfg(target_os = "macos")]
+            self.refresh_system_window_tabs(cx);
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn refresh_system_window_tabs(&self, cx: &mut App) {
+        let window_id = self.handle.window_id();
+        SystemWindowTabController::set_visible(cx, self.platform_window.tab_bar_visible());
+        SystemWindowTabController::remove_tab(cx, window_id);
+        if let Some(tabs) = self.platform_window.tabbed_windows() {
+            SystemWindowTabController::add_tab(cx, window_id, tabs);
+        }
     }
 
     fn complete_frame(&self) {
@@ -4435,17 +4476,23 @@ impl Window {
 
     /// Focus the current window and bring it to the foreground at the platform level.
     pub fn activate_window(&self) {
-        self.platform_window.activate();
+        if self.published {
+            self.platform_window.activate();
+        }
     }
 
     /// Minimize the current window at the platform level.
     pub fn minimize_window(&self) {
-        self.platform_window.minimize();
+        if self.published {
+            self.platform_window.minimize();
+        }
     }
 
     /// Toggle full screen status on the current window at the platform level.
     pub fn toggle_fullscreen(&self) {
-        self.platform_window.toggle_fullscreen();
+        if self.published {
+            self.platform_window.toggle_fullscreen();
+        }
     }
 
     /// Updates the IME panel position suggestions for languages like japanese, chinese.

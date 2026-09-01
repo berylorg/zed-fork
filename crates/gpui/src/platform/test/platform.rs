@@ -199,14 +199,21 @@ impl TestPlatform {
         let previous_window = self.active_window.borrow_mut().take();
         self.active_window.borrow_mut().clone_from(&window);
 
+        if let Some(previous_window) = previous_window.as_ref() {
+            if let Some(window) = window.as_ref()
+                && Rc::ptr_eq(&previous_window.0, &window.0)
+            {
+                return;
+            }
+            previous_window.set_active_state(false);
+        }
+        if let Some(window) = window.as_ref() {
+            window.set_active_state(true);
+        }
+
         executor
             .spawn(async move {
                 if let Some(previous_window) = previous_window {
-                    if let Some(window) = window.as_ref()
-                        && Rc::ptr_eq(&previous_window.0, &window.0)
-                    {
-                        return;
-                    }
                     previous_window.simulate_active_status_change(false);
                 }
                 if let Some(window) = window {
