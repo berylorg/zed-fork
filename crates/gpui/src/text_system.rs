@@ -307,6 +307,36 @@ impl TextSystem {
         }
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    #[allow(missing_docs)]
+    pub fn set_glyph_raster_bounds_for_test(
+        &self,
+        layout: &LineLayout,
+        scale_factor: f32,
+        bounds: Bounds<DevicePixels>,
+    ) {
+        let mut raster_bounds = self.raster_bounds.write();
+        for run in &layout.runs {
+            for glyph in &run.glyphs {
+                for x in 0..SUBPIXEL_VARIANTS_X {
+                    for y in 0..SUBPIXEL_VARIANTS_Y {
+                        raster_bounds.insert(
+                            RenderGlyphParams {
+                                font_id: run.font_id,
+                                glyph_id: glyph.id,
+                                font_size: layout.font_size,
+                                subpixel_variant: crate::point(x, y),
+                                scale_factor,
+                                is_emoji: glyph.is_emoji,
+                            },
+                            bounds,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     /// Get the rasterized size and location of a specific, rendered glyph.
     pub(crate) fn raster_bounds(&self, params: &RenderGlyphParams) -> Result<Bounds<DevicePixels>> {
         let raster_bounds = self.raster_bounds.upgradable_read();

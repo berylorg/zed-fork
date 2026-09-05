@@ -67,6 +67,17 @@ impl ShapedLine {
         window: &mut Window,
         cx: &mut App,
     ) -> Result<()> {
+        self.paint_with_color(origin, line_height, None, window, cx)
+    }
+
+    pub(crate) fn paint_with_color(
+        &self,
+        origin: Point<Pixels>,
+        line_height: Pixels,
+        color: Option<Hsla>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Result<()> {
         paint_line(
             origin,
             origin.x,
@@ -78,6 +89,7 @@ impl ShapedLine {
             TextAlign::default(),
             None,
             &self.decoration_runs,
+            color,
             &[],
             window,
             cx,
@@ -158,6 +170,7 @@ impl WrappedLine {
             align,
             align_width,
             &self.decoration_runs,
+            None,
             &self.wrap_boundaries,
             window,
             cx,
@@ -172,6 +185,7 @@ impl WrappedLine {
         first_line_inline_offset: Pixels,
         line_height: Pixels,
         first_line_block_extent: Pixels,
+        color: Option<Hsla>,
         window: &mut Window,
         cx: &mut App,
     ) -> Result<()> {
@@ -206,6 +220,7 @@ impl WrappedLine {
             TextAlign::Left,
             self.layout.wrap_width,
             &self.decoration_runs,
+            color,
             &self.wrap_boundaries,
             window,
             cx,
@@ -304,6 +319,7 @@ fn paint_line(
     align: TextAlign,
     align_width: Option<Pixels>,
     decoration_runs: &[DecorationRun],
+    foreground: Option<Hsla>,
     wrap_boundaries: &[WrapBoundary],
     window: &mut Window,
     cx: &mut App,
@@ -404,6 +420,7 @@ fn paint_line(
                     }
 
                     if let Some(style_run) = style_run {
+                        let run_color = foreground.unwrap_or(style_run.color);
                         if let Some((_, underline_style)) = &mut current_underline
                             && style_run.underline.as_ref() != Some(underline_style)
                         {
@@ -416,7 +433,7 @@ fn paint_line(
                                     glyph_origin.y + baseline_offset.y + (layout.descent * 0.618),
                                 ),
                                 UnderlineStyle {
-                                    color: Some(run_underline.color.unwrap_or(style_run.color)),
+                                    color: Some(run_underline.color.unwrap_or(run_color)),
                                     thickness: run_underline.thickness,
                                     wavy: run_underline.wavy,
                                 },
@@ -435,14 +452,14 @@ fn paint_line(
                                         + (((layout.ascent * 0.5) + baseline_offset.y) * 0.5),
                                 ),
                                 StrikethroughStyle {
-                                    color: Some(run_strikethrough.color.unwrap_or(style_run.color)),
+                                    color: Some(run_strikethrough.color.unwrap_or(run_color)),
                                     thickness: run_strikethrough.thickness,
                                 },
                             ));
                         }
 
                         run_end += style_run.len as usize;
-                        color = style_run.color;
+                        color = run_color;
                     } else {
                         run_end = layout.len;
                         finished_underline = current_underline.take();

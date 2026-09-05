@@ -35,6 +35,20 @@ use std::{
     pin::Pin,
 };
 
+#[allow(missing_docs)]
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PaintSnapshot {
+    pub glyphs: Vec<(crate::Bounds<crate::ScaledPixels>, crate::Hsla)>,
+    pub decorations: Vec<(
+        crate::Bounds<crate::ScaledPixels>,
+        crate::Hsla,
+        crate::ScaledPixels,
+        bool,
+    )>,
+    pub backgrounds: Vec<(crate::Bounds<crate::ScaledPixels>, crate::Background)>,
+    pub color_glyphs: Vec<(crate::Bounds<crate::ScaledPixels>, f32)>,
+}
+
 /// Run the given test function with the configured parameters.
 /// This is intended for use with the `gpui::test` macro
 /// and generally should not be used directly.

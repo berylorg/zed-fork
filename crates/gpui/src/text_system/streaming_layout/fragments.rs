@@ -191,6 +191,27 @@ impl StreamingTextFragment {
         window: &mut Window,
         cx: &mut App,
     ) -> crate::Result<()> {
+        self.paint_with_foreground(session_origin, None, window, cx)
+    }
+
+    #[allow(missing_docs)]
+    pub fn paint_with_color(
+        &self,
+        session_origin: Point<Pixels>,
+        color: Hsla,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> crate::Result<()> {
+        self.paint_with_foreground(session_origin, Some(color), window, cx)
+    }
+
+    fn paint_with_foreground(
+        &self,
+        session_origin: Point<Pixels>,
+        color: Option<Hsla>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> crate::Result<()> {
         checked::validate_point(session_origin, StreamingLayoutMetric::PaintOrigin)?;
         self.line.paint_streaming(
             checked::checked_point_add(
@@ -201,6 +222,7 @@ impl StreamingTextFragment {
             self.first_line_inline_offset,
             self.line_height,
             self.first_line_block_extent,
+            color,
             window,
             cx,
         )
@@ -297,6 +319,27 @@ impl StreamingAtomFragment {
         window: &mut Window,
         cx: &mut App,
     ) -> crate::Result<()> {
+        self.paint_with_foreground(session_origin, None, window, cx)
+    }
+
+    /// Paints with a call-local foreground and implicit decoration color, retaining geometry.
+    pub fn paint_with_color(
+        &self,
+        session_origin: Point<Pixels>,
+        color: Hsla,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> crate::Result<()> {
+        self.paint_with_foreground(session_origin, Some(color), window, cx)
+    }
+
+    fn paint_with_foreground(
+        &self,
+        session_origin: Point<Pixels>,
+        color: Option<Hsla>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> crate::Result<()> {
         checked::validate_point(session_origin, StreamingLayoutMetric::PaintOrigin)?;
         let origin = checked::checked_point_add(
             session_origin,
@@ -315,8 +358,13 @@ impl StreamingAtomFragment {
                 StreamingLayoutComponent::Fragments,
             )?,
         );
-        self.presentation_line
-            .paint(text_origin, self.bounds.size.height, window, cx)
+        self.presentation_line.paint_with_color(
+            text_origin,
+            self.bounds.size.height,
+            color,
+            window,
+            cx,
+        )
     }
 
     /// Paints the optional app-neutral background at the atom's exact geometry.
@@ -325,8 +373,18 @@ impl StreamingAtomFragment {
         session_origin: Point<Pixels>,
         window: &mut Window,
     ) -> crate::Result<()> {
+        self.paint_background_with_color(session_origin, self.background, window)
+    }
+
+    #[allow(missing_docs)]
+    pub fn paint_background_with_color(
+        &self,
+        session_origin: Point<Pixels>,
+        color: Option<Hsla>,
+        window: &mut Window,
+    ) -> crate::Result<()> {
         checked::validate_point(session_origin, StreamingLayoutMetric::PaintOrigin)?;
-        if let Some(background) = self.background {
+        if let Some(background) = color {
             let origin = checked::checked_point_add(
                 session_origin,
                 self.bounds.origin,

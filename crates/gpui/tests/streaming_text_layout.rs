@@ -206,3 +206,7 @@ mod layout_regressions;
 #[cfg(feature = "test-support")]
 #[path = "streaming_text_layout/charge_regressions.rs"]
 mod charge_regressions;
+
+#[cfg(feature = "test-support")]
+#[path = "streaming_text_layout/live_paint.rs"]
+mod live_paint;

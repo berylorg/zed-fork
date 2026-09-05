@@ -38,6 +38,23 @@ The fork may carry GPUI glyph batching memory optimization work that reduces tra
 
 ## Bounded Streaming Text Layout
 
+### Live Paint Colors
+
+Consumers may paint an immutable streaming text, oversize-atom, or inline-object fragment with a
+replacement foreground color without reshaping it or changing its stored presentation. The
+replacement also supplies the fallback color for underline and strikethrough decorations;
+explicit decoration colors and color-emoji rendering remain unchanged. Atom and inline-object
+background painting accepts a replacement color or no background. Ordinary per-run text
+backgrounds remain part of the retained run presentation.
+
+These overrides apply only to the current paint call. They preserve the fragment's shared layout,
+wrapping, placement, composite positions, hit and caret maps, baseline, and retained-payload
+accounting, and create no replacement runs or persistent style state. Existing paint calls retain
+their stored colors. Consumers own coherent appearance selection across their paint passes;
+GPUI does not add an appearance coordinator or a geometry transition for color changes.
+
+### Layout Contract
+
 The fork provides a GPUI streaming text-layout primitive for consumers whose logical text can exceed
 one bounded resident string. The primitive accepts an ordered sequence of bounded shaping segments,
 preserves a compact continuation across them, and produces immutable visual-line fragments, wrap

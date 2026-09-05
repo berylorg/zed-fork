@@ -5031,6 +5031,34 @@ impl Window {
         arena_clear_needed.clear();
         self.complete_frame();
     }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[allow(missing_docs)]
+    pub fn paint_snapshot_for_test(&self) -> crate::test::PaintSnapshot {
+        let scene = &self.next_frame.scene;
+        crate::test::PaintSnapshot {
+            glyphs: scene
+                .monochrome_sprites
+                .iter()
+                .map(|sprite| (sprite.bounds, sprite.color))
+                .collect(),
+            decorations: scene
+                .underlines
+                .iter()
+                .map(|line| (line.bounds, line.color, line.thickness, line.wavy != 0))
+                .collect(),
+            backgrounds: scene
+                .quads
+                .iter()
+                .map(|quad| (quad.bounds, quad.background))
+                .collect(),
+            color_glyphs: scene
+                .polychrome_sprites
+                .iter()
+                .map(|sprite| (sprite.bounds, sprite.opacity))
+                .collect(),
+        }
+    }
 }
 
 // #[derive(Clone, Copy, Eq, PartialEq, Hash)]
