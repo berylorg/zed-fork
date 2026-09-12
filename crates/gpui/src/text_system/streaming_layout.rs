@@ -10,6 +10,8 @@ mod finalization;
 mod fragments;
 mod inline;
 mod inputs;
+mod map_positions;
+mod maps;
 mod object_fragments;
 mod position;
 mod session;

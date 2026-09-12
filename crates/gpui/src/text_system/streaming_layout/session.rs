@@ -132,7 +132,7 @@ impl StreamingLayoutSession<'_> {
         });
         let origin = point(Pixels::ZERO, placement_prior.block_offset);
         let maps = build_maps(
-            &line,
+            &line.layout,
             &logical_range,
             placement_prior.inline_offset,
             origin,
