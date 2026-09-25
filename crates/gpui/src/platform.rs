@@ -23,6 +23,11 @@ mod test;
 #[cfg(target_os = "windows")]
 mod windows;
 
+#[cfg(all(target_os = "windows", feature = "test-support"))]
+pub use windows::with_windows_window_creation_hook_for_test;
+#[cfg(target_os = "windows")]
+pub use windows::{WindowsOuterWindowPlacement, WindowsWindowPlacementMonitor};
+
 #[cfg(all(
     feature = "screen-capture",
     any(
@@ -1617,6 +1622,10 @@ pub struct WindowOptions {
     /// - `Some(WindowBounds)`: Open a window with corresponding state and its restore size.
     pub window_bounds: Option<WindowBounds>,
 
+    #[cfg(target_os = "windows")]
+    #[allow(missing_docs)]
+    pub windows_outer_bounds_monitor: Option<WindowsWindowPlacementMonitor>,
+
     /// The titlebar configuration of the window
     pub titlebar: Option<TitlebarOptions>,
 
@@ -1670,6 +1679,9 @@ pub struct WindowOptions {
 )]
 pub(crate) struct WindowParams {
     pub bounds: Bounds<Pixels>,
+
+    #[cfg(target_os = "windows")]
+    pub windows_outer_bounds_monitor: Option<WindowsWindowPlacementMonitor>,
 
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub initial_state: InitialWindowState,
@@ -1757,6 +1769,8 @@ impl Default for WindowOptions {
     fn default() -> Self {
         Self {
             window_bounds: None,
+            #[cfg(target_os = "windows")]
+            windows_outer_bounds_monitor: None,
             titlebar: Some(TitlebarOptions {
                 title: Default::default(),
                 appears_transparent: Default::default(),

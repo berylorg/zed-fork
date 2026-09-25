@@ -32,6 +32,30 @@ unsafe impl Send for WindowsDisplay {}
 unsafe impl Sync for WindowsDisplay {}
 
 impl WindowsDisplay {
+    pub(crate) fn from_prepared(
+        handle: HMONITOR,
+        display_id: DisplayId,
+        physical_bounds: Bounds<DevicePixels>,
+        scale_factor: f32,
+        uuid: Uuid,
+    ) -> Self {
+        Self {
+            handle,
+            display_id,
+            scale_factor,
+            bounds: Bounds {
+                origin: logical_point(
+                    physical_bounds.origin.x.0 as f32,
+                    physical_bounds.origin.y.0 as f32,
+                    scale_factor,
+                ),
+                size: physical_bounds.size.to_pixels(scale_factor),
+            },
+            physical_bounds,
+            uuid,
+        }
+    }
+
     pub(crate) fn new(display_id: DisplayId) -> Option<Self> {
         let screen = available_monitors().into_iter().nth(display_id.0 as _)?;
         let info = get_monitor_info(screen).log_err()?;
@@ -222,7 +246,7 @@ unsafe extern "system" fn monitor_enum_proc(
     BOOL(1)
 }
 
-fn get_monitor_info(hmonitor: HMONITOR) -> anyhow::Result<MONITORINFOEXW> {
+pub(super) fn get_monitor_info(hmonitor: HMONITOR) -> anyhow::Result<MONITORINFOEXW> {
     let mut monitor_info: MONITORINFOEXW = unsafe { std::mem::zeroed() };
     monitor_info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
     let status = unsafe {
@@ -238,7 +262,7 @@ fn get_monitor_info(hmonitor: HMONITOR) -> anyhow::Result<MONITORINFOEXW> {
     }
 }
 
-fn generate_uuid(device_name: &[u16]) -> Uuid {
+pub(super) fn generate_uuid(device_name: &[u16]) -> Uuid {
     let name = device_name
         .iter()
         .flat_map(|&a| a.to_be_bytes())

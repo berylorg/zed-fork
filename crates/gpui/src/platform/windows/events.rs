@@ -138,7 +138,10 @@ impl WindowsWindowInner {
             let monitor = unsafe { MonitorFromWindow(handle, MONITOR_DEFAULTTONULL) };
             // minimize the window can trigger this event too, in this case,
             // monitor is invalid, we do nothing.
-            if !monitor.is_invalid() && lock.display.handle != monitor {
+            if lock.prepared_monitor.is_none()
+                && !monitor.is_invalid()
+                && lock.display.handle != monitor
+            {
                 // we will get the same monitor if we only have one
                 lock.display = WindowsDisplay::new_with_handle(monitor);
             }
@@ -826,6 +829,9 @@ impl WindowsWindowInner {
     /// For example, in the case of condition 2, where the monitor on which the window is
     /// located has actually changed nothing, it will still receive this event.
     fn handle_display_change_msg(&self, handle: HWND) -> Option<isize> {
+        if self.state.borrow().prepared_monitor.is_some() {
+            return Some(0);
+        }
         // NOTE:
         // Even the `lParam` holds the resolution of the screen, we just ignore it.
         // Because WM_DPICHANGED, WM_MOVE, WM_SIZE will come first, window reposition and resize

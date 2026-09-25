@@ -55,6 +55,7 @@ pub struct WindowsWindowState {
     pub nc_button_pressed: Option<u32>,
 
     pub display: WindowsDisplay,
+    pub(crate) prepared_monitor: Option<WindowsWindowPlacementMonitor>,
     fullscreen: Option<StyleAndBounds>,
     initial_placement: Option<WindowOpenStatus>,
     hwnd: HWND,
@@ -86,6 +87,7 @@ impl WindowsWindowState {
         min_size: Option<Size<Pixels>>,
         appearance: WindowAppearance,
         disable_direct_composition: bool,
+        prepared_monitor: Option<WindowsWindowPlacementMonitor>,
     ) -> Result<Self> {
         let scale_factor = {
             let monitor_dpi = unsafe { GetDpiForWindow(hwnd) } as f32;
@@ -140,6 +142,7 @@ impl WindowsWindowState {
             current_cursor,
             nc_button_pressed,
             display,
+            prepared_monitor,
             fullscreen,
             initial_placement,
             hwnd,
@@ -207,6 +210,9 @@ impl WindowsWindowState {
 
 impl WindowsWindowInner {
     fn new(context: &mut WindowCreateContext, hwnd: HWND, cs: &CREATESTRUCTW) -> Result<Rc<Self>> {
+        if let Some(monitor) = context.prepared_monitor {
+            monitor.validate_window(hwnd)?;
+        }
         let state = RefCell::new(WindowsWindowState::new(
             hwnd,
             &context.directx_devices,
@@ -216,6 +222,7 @@ impl WindowsWindowInner {
             context.min_size,
             context.appearance,
             context.disable_direct_composition,
+            context.prepared_monitor,
         )?);
 
         Ok(Rc::new_cyclic(|this| Self {
@@ -297,6 +304,9 @@ impl WindowsWindowInner {
     }
 
     fn set_window_placement(&self) -> Result<()> {
+        if let Some(monitor) = self.state.borrow().prepared_monitor {
+            monitor.validate_window(self.hwnd)?;
+        }
         let Some(open_status) = self.state.borrow_mut().initial_placement.take() else {
             return Ok(());
         };
@@ -317,6 +327,7 @@ impl WindowsWindowInner {
             self.state.borrow_mut().initial_placement = Some(open_status);
             return Err(error);
         }
+        self.state.borrow_mut().prepared_monitor = None;
         Ok(())
     }
 }
@@ -340,6 +351,7 @@ struct WindowCreateContext {
     handle: AnyWindowHandle,
     hide_title_bar: bool,
     display: WindowsDisplay,
+    prepared_monitor: Option<WindowsWindowPlacementMonitor>,
     is_movable: bool,
     min_size: Option<Size<Pixels>>,
     executor: ForegroundExecutor,
@@ -352,6 +364,59 @@ struct WindowCreateContext {
     appearance: WindowAppearance,
     disable_direct_composition: bool,
     directx_devices: DirectXDevices,
+}
+
+struct PendingNativeWindow {
+    hwnd: HWND,
+    drag_drop_registered: bool,
+    armed: bool,
+}
+
+#[cfg(feature = "test-support")]
+type WindowCreationHook = Box<dyn FnOnce(usize) -> Result<()>>;
+
+#[cfg(feature = "test-support")]
+thread_local! {
+    static WINDOW_CREATION_HOOK: RefCell<Option<WindowCreationHook>> = RefCell::new(None);
+}
+
+#[cfg(feature = "test-support")]
+#[allow(missing_docs)]
+pub fn with_windows_window_creation_hook_for_test<R>(
+    hook: impl FnOnce(usize) -> Result<()> + 'static,
+    operation: impl FnOnce() -> R,
+) -> R {
+    struct RestoreHook(Option<WindowCreationHook>);
+    impl Drop for RestoreHook {
+        fn drop(&mut self) {
+            WINDOW_CREATION_HOOK.with(|slot| *slot.borrow_mut() = self.0.take());
+        }
+    }
+    let _restore =
+        RestoreHook(WINDOW_CREATION_HOOK.with(|slot| slot.replace(Some(Box::new(hook)))));
+    operation()
+}
+
+#[cfg(feature = "test-support")]
+fn run_window_creation_hook(hwnd: HWND) -> Result<()> {
+    let hook = WINDOW_CREATION_HOOK.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook(hwnd.0 as usize)?;
+    }
+    Ok(())
+}
+
+impl Drop for PendingNativeWindow {
+    fn drop(&mut self) {
+        if self.armed {
+            unsafe {
+                if self.drag_drop_registered {
+                    RevokeDragDrop(self.hwnd).log_err();
+                }
+                DestroyWindow(self.hwnd).log_err();
+            }
+        }
+    }
 }
 
 impl WindowsWindow {
@@ -410,7 +475,26 @@ impl WindowsWindow {
         }
 
         let hinstance = get_module_handle();
-        let display = if let Some(display_id) = params.display_id {
+        let prepared_monitor = params.windows_outer_bounds_monitor;
+        let outer_placement = if let Some(monitor) = prepared_monitor {
+            anyhow::ensure!(
+                params.display_id.is_none(),
+                "outer window placement conflicts with display_id"
+            );
+            anyhow::ensure!(
+                params.initial_state != InitialWindowState::Fullscreen,
+                "outer window placement does not support fullscreen"
+            );
+            let placement =
+                monitor.outer_placement(params.bounds, params.kind == WindowKind::PopUp)?;
+            monitor.validate_placement(placement)?;
+            Some(placement)
+        } else {
+            None
+        };
+        let display = if let Some(monitor) = prepared_monitor {
+            monitor.validate()?
+        } else if let Some(display_id) = params.display_id {
             // if we obtain a display_id, then this ID must be valid.
             WindowsDisplay::new(display_id).unwrap()
         } else {
@@ -422,6 +506,7 @@ impl WindowsWindow {
             handle,
             hide_title_bar,
             display,
+            prepared_monitor,
             is_movable: params.is_movable,
             min_size: params.window_min_size,
             executor,
@@ -435,16 +520,17 @@ impl WindowsWindow {
             disable_direct_composition,
             directx_devices,
         };
+        let creation_bounds = outer_placement.map(|placement| placement.screen_bounds());
         let creation_result = unsafe {
             CreateWindowExW(
                 dwexstyle,
                 WINDOW_CLASS_NAME,
                 &window_name,
                 dwstyle,
-                CW_USEDEFAULT,
-                CW_USEDEFAULT,
-                CW_USEDEFAULT,
-                CW_USEDEFAULT,
+                creation_bounds.map_or(CW_USEDEFAULT, |bounds| bounds.origin.x.0),
+                creation_bounds.map_or(CW_USEDEFAULT, |bounds| bounds.origin.y.0),
+                creation_bounds.map_or(CW_USEDEFAULT, |bounds| bounds.size.width.0),
+                creation_bounds.map_or(CW_USEDEFAULT, |bounds| bounds.size.height.0),
                 None,
                 None,
                 Some(hinstance.into()),
@@ -454,25 +540,61 @@ impl WindowsWindow {
 
         // Failure to create a `WindowsWindowState` can cause window creation to fail,
         // so check the inner result first.
-        let this = context.inner.take().unwrap()?;
-        let hwnd = creation_result?;
+        let mut pending_window = creation_result
+            .as_ref()
+            .ok()
+            .map(|hwnd| PendingNativeWindow {
+                hwnd: *hwnd,
+                drag_drop_registered: false,
+                armed: true,
+            });
+        let this = context
+            .inner
+            .take()
+            .context("native window creation did not initialize window state")??;
+        let hwnd = creation_result.context("creating native window")?;
 
         register_drag_drop(&this)?;
+        if let Some(pending) = pending_window.as_mut() {
+            pending.drag_drop_registered = true;
+        }
+        #[cfg(feature = "test-support")]
+        run_window_creation_hook(hwnd)?;
         configure_dwm_dark_mode(hwnd, appearance);
         this.state.borrow_mut().border_offset.update(hwnd)?;
-        let placement = retrieve_window_placement(
-            hwnd,
-            display,
-            params.bounds,
-            this.state.borrow().scale_factor,
-            this.state.borrow().border_offset,
-        )?;
+        let placement = if let Some(outer_placement) = outer_placement {
+            WINDOWPLACEMENT {
+                length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
+                rcNormalPosition: super::placement::bounds_rect(
+                    outer_placement.workspace_bounds(),
+                )?,
+                ..Default::default()
+            }
+        } else {
+            retrieve_window_placement(
+                hwnd,
+                display,
+                params.bounds,
+                this.state.borrow().scale_factor,
+                this.state.borrow().border_offset,
+            )?
+        };
         let state = match params.initial_state {
             InitialWindowState::Maximized => WindowOpenState::Maximized,
             InitialWindowState::Fullscreen => WindowOpenState::Fullscreen,
             InitialWindowState::Windowed => WindowOpenState::Windowed,
         };
-        if params.show {
+        if let Some(monitor) = prepared_monitor {
+            let mut hidden_placement = placement;
+            hidden_placement.showCmd = SW_HIDE.0 as u32;
+            unsafe { SetWindowPlacement(hwnd, &hidden_placement) }
+                .context("failed to prepare hidden outer window placement")?;
+            monitor.validate_window(hwnd)?;
+            this.state.borrow_mut().initial_placement = Some(WindowOpenStatus { state });
+            if params.show {
+                this.set_window_placement()?;
+            }
+        } else if params.show {
             let mut shown_placement = placement;
             if matches!(state, WindowOpenState::Maximized) {
                 shown_placement.showCmd = SW_SHOWMAXIMIZED.0 as u32;
@@ -493,6 +615,9 @@ impl WindowsWindow {
             this.state.borrow_mut().initial_placement = Some(WindowOpenStatus { state });
         }
 
+        if let Some(pending) = pending_window.as_mut() {
+            pending.armed = false;
+        }
         Ok(Self(this))
     }
 }

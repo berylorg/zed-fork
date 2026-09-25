@@ -1023,6 +1023,8 @@ impl Window {
     ) -> Result<Self> {
         let WindowOptions {
             window_bounds,
+            #[cfg(target_os = "windows")]
+            windows_outer_bounds_monitor,
             titlebar,
             focus,
             show,
@@ -1039,6 +1041,22 @@ impl Window {
             tabbing_identifier,
         } = options;
 
+        #[cfg(target_os = "windows")]
+        if windows_outer_bounds_monitor.is_some() {
+            anyhow::ensure!(
+                window_bounds.is_some(),
+                "outer window placement requires explicit bounds"
+            );
+            anyhow::ensure!(
+                display_id.is_none(),
+                "outer window placement conflicts with display_id"
+            );
+            anyhow::ensure!(
+                !matches!(window_bounds, Some(WindowBounds::Fullscreen(_))),
+                "outer window placement does not support fullscreen"
+            );
+        }
+
         let bounds = window_bounds
             .map(|bounds| bounds.get_bounds())
             .unwrap_or_else(|| default_bounds(display_id, cx));
@@ -1051,6 +1069,8 @@ impl Window {
             handle,
             WindowParams {
                 bounds,
+                #[cfg(target_os = "windows")]
+                windows_outer_bounds_monitor,
                 initial_state,
                 titlebar,
                 kind,

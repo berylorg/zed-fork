@@ -9,6 +9,7 @@ mod dispatcher;
 mod display;
 mod events;
 mod keyboard;
+mod placement;
 mod platform;
 mod system_settings;
 mod util;
@@ -27,10 +28,13 @@ pub(crate) use dispatcher::*;
 pub(crate) use display::*;
 pub(crate) use events::*;
 pub(crate) use keyboard::*;
+pub use placement::{WindowsOuterWindowPlacement, WindowsWindowPlacementMonitor};
 pub(crate) use platform::*;
 pub(crate) use system_settings::*;
 pub(crate) use util::*;
 pub(crate) use vsync::*;
+#[cfg(feature = "test-support")]
+pub use window::with_windows_window_creation_hook_for_test;
 pub(crate) use window::*;
 pub(crate) use wrapper::*;
 
