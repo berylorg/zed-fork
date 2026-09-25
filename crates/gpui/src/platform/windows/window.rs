@@ -62,7 +62,8 @@ pub struct WindowsWindowState {
 }
 
 pub(crate) struct WindowsWindowInner {
-    hwnd: HWND,
+    pub(super) hwnd: HWND,
+    pub(super) native_operation: RefCell<super::native_operation::NativeOperationState>,
     pub(super) this: Weak<Self>,
     drop_target_helper: IDropTargetHelper,
     pub(crate) state: RefCell<WindowsWindowState>,
@@ -227,6 +228,7 @@ impl WindowsWindowInner {
 
         Ok(Rc::new_cyclic(|this| Self {
             hwnd,
+            native_operation: RefCell::new(Default::default()),
             this: this.clone(),
             drop_target_helper: context.drop_target_helper.clone(),
             state,
@@ -243,6 +245,10 @@ impl WindowsWindowInner {
     }
 
     fn set_fullscreen(&self) -> Result<()> {
+        anyhow::ensure!(
+            !self.native_exposure_blocked(),
+            "native window operation or close intent prevents fullscreen changes"
+        );
         let mut lock = self.state.borrow_mut();
         let StyleAndBounds {
             style,
@@ -304,6 +310,10 @@ impl WindowsWindowInner {
     }
 
     fn set_window_placement(&self) -> Result<()> {
+        anyhow::ensure!(
+            !self.native_exposure_blocked(),
+            "native window operation or close intent prevents publication"
+        );
         if let Some(monitor) = self.state.borrow().prepared_monitor {
             monitor.validate_window(self.hwnd)?;
         }
@@ -328,6 +338,7 @@ impl WindowsWindowInner {
             return Err(error);
         }
         self.state.borrow_mut().prepared_monitor = None;
+        self.native_did_publish();
         Ok(())
     }
 }
@@ -413,6 +424,8 @@ impl Drop for PendingNativeWindow {
                 if self.drag_drop_registered {
                     RevokeDragDrop(self.hwnd).log_err();
                 }
+                #[cfg(feature = "test-support")]
+                super::native_operation::observe_native_destruction(self.hwnd);
                 DestroyWindow(self.hwnd).log_err();
             }
         }
@@ -641,22 +654,25 @@ impl rwh::HasDisplayHandle for WindowsWindow {
 
 impl Drop for WindowsWindow {
     fn drop(&mut self) {
-        // clone this `Rc` to prevent early release of the pointer
-        let this = self.0.clone();
-        self.0
-            .executor
-            .spawn(async move {
-                let handle = this.hwnd;
-                unsafe {
-                    RevokeDragDrop(handle).log_err();
-                    DestroyWindow(handle).log_err();
-                }
-            })
-            .detach();
+        self.0.request_native_destruction();
     }
 }
 
 impl PlatformWindow for WindowsWindow {
+    fn lease_hidden_windows_window(
+        &mut self,
+    ) -> Result<(WindowsHiddenWindowLease, WindowsHiddenWindowLeaseReleased)> {
+        anyhow::ensure!(
+            self.0.state.borrow().initial_placement.is_some(),
+            "native operation requires a never-published hidden window"
+        );
+        self.0.lease_hidden_native_window()
+    }
+
+    fn windows_native_close_requested(&self) -> bool {
+        self.0.native_close_requested()
+    }
+
     fn bounds(&self) -> Bounds<Pixels> {
         self.0.state.borrow().bounds()
     }
@@ -834,7 +850,10 @@ impl PlatformWindow for WindowsWindow {
         self.0
             .executor
             .spawn(async move {
-                this.set_window_placement().log_err();
+                if this.native_exposure_blocked() || this.set_window_placement().log_err().is_none()
+                {
+                    return;
+                }
 
                 unsafe {
                     // If the window is minimized, restore it.
@@ -929,10 +948,16 @@ impl PlatformWindow for WindowsWindow {
     }
 
     fn minimize(&self) {
+        if self.0.native_exposure_blocked() || self.0.state.borrow().initial_placement.is_some() {
+            return;
+        }
         unsafe { ShowWindowAsync(self.0.hwnd, SW_MINIMIZE).ok().log_err() };
     }
 
     fn zoom(&self) {
+        if self.0.native_exposure_blocked() {
+            return;
+        }
         unsafe {
             if IsWindowVisible(self.0.hwnd).as_bool() {
                 ShowWindowAsync(self.0.hwnd, SW_MAXIMIZE).ok().log_err();
@@ -943,6 +968,9 @@ impl PlatformWindow for WindowsWindow {
     }
 
     fn toggle_fullscreen(&self) {
+        if self.0.native_exposure_blocked() {
+            return;
+        }
         if unsafe { IsWindowVisible(self.0.hwnd).as_bool() } {
             self.0.toggle_fullscreen();
         } else if let Some(status) = self.0.state.borrow_mut().initial_placement.as_mut() {

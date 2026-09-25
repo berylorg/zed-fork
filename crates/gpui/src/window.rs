@@ -1501,6 +1501,27 @@ impl Window {
         self.removed = true;
     }
 
+    #[cfg(target_os = "windows")]
+    #[allow(missing_docs)]
+    pub fn lease_hidden_windows_window(
+        &mut self,
+    ) -> Result<(
+        crate::WindowsHiddenWindowLease,
+        crate::WindowsHiddenWindowLeaseReleased,
+    )> {
+        anyhow::ensure!(
+            !self.removed && !self.published,
+            "native operation requires an unpublished, unremoved window"
+        );
+        self.platform_window.lease_hidden_windows_window()
+    }
+
+    #[cfg(target_os = "windows")]
+    #[allow(missing_docs)]
+    pub fn windows_native_close_requested(&self) -> bool {
+        self.platform_window.windows_native_close_requested()
+    }
+
     /// Obtain the currently focused [`FocusHandle`]. If no elements are focused, returns `None`.
     pub fn focused(&self, cx: &App) -> Option<FocusHandle> {
         self.focus

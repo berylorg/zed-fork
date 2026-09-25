@@ -257,6 +257,9 @@ impl WindowsWindowInner {
     }
 
     fn handle_close_msg(&self) -> Option<isize> {
+        if self.latch_native_close_request() {
+            return Some(0);
+        }
         let mut callback = self.state.borrow_mut().callbacks.should_close.take()?;
         let should_close = callback();
         self.state.borrow_mut().callbacks.should_close = Some(callback);
@@ -264,6 +267,7 @@ impl WindowsWindowInner {
     }
 
     fn handle_destroy_msg(&self, handle: HWND) -> Option<isize> {
+        self.native_did_destroy();
         let callback = {
             let mut lock = self.state.borrow_mut();
             lock.callbacks.close.take()
@@ -829,7 +833,7 @@ impl WindowsWindowInner {
     /// For example, in the case of condition 2, where the monitor on which the window is
     /// located has actually changed nothing, it will still receive this event.
     fn handle_display_change_msg(&self, handle: HWND) -> Option<isize> {
-        if self.state.borrow().prepared_monitor.is_some() {
+        if self.native_exposure_blocked() || self.state.borrow().prepared_monitor.is_some() {
             return Some(0);
         }
         // NOTE:
@@ -1042,10 +1046,15 @@ impl WindowsWindowInner {
         {
             let handled = match (wparam.0 as u32, last_pressed) {
                 (HTMINBUTTON, HTMINBUTTON) => {
-                    unsafe { ShowWindowAsync(handle, SW_MINIMIZE).ok().log_err() };
+                    if !self.native_exposure_blocked() {
+                        unsafe { ShowWindowAsync(handle, SW_MINIMIZE).ok().log_err() };
+                    }
                     true
                 }
                 (HTMAXBUTTON, HTMAXBUTTON) => {
+                    if self.native_exposure_blocked() {
+                        return Some(0);
+                    }
                     if self.state.borrow().is_maximized() {
                         unsafe { ShowWindowAsync(handle, SW_NORMAL).ok().log_err() };
                     } else {
@@ -1134,6 +1143,14 @@ impl WindowsWindowInner {
     }
 
     fn handle_system_command(&self, wparam: WPARAM) -> Option<isize> {
+        if self.native_exposure_blocked()
+            && matches!(
+                wparam.0 as u32 & 0xfff0,
+                SC_MINIMIZE | SC_MAXIMIZE | SC_RESTORE
+            )
+        {
+            return Some(0);
+        }
         if wparam.0 == SC_KEYMENU as usize {
             let mut lock = self.state.borrow_mut();
             if lock.system_key_handled {

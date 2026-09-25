@@ -9,6 +9,7 @@ mod dispatcher;
 mod display;
 mod events;
 mod keyboard;
+mod native_operation;
 mod placement;
 mod platform;
 mod system_settings;
@@ -28,6 +29,11 @@ pub(crate) use dispatcher::*;
 pub(crate) use display::*;
 pub(crate) use events::*;
 pub(crate) use keyboard::*;
+#[cfg(feature = "test-support")]
+pub use native_operation::with_windows_window_destruction_observer_for_test;
+pub use native_operation::{
+    WindowsHiddenWindowLease, WindowsHiddenWindowLeaseRelease, WindowsHiddenWindowLeaseReleased,
+};
 pub use placement::{WindowsOuterWindowPlacement, WindowsWindowPlacementMonitor};
 pub(crate) use platform::*;
 pub(crate) use system_settings::*;

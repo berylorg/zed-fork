@@ -25,6 +25,12 @@ mod windows;
 
 #[cfg(all(target_os = "windows", feature = "test-support"))]
 pub use windows::with_windows_window_creation_hook_for_test;
+#[cfg(all(target_os = "windows", feature = "test-support"))]
+pub use windows::with_windows_window_destruction_observer_for_test;
+#[cfg(target_os = "windows")]
+pub use windows::{
+    WindowsHiddenWindowLease, WindowsHiddenWindowLeaseRelease, WindowsHiddenWindowLeaseReleased,
+};
 #[cfg(target_os = "windows")]
 pub use windows::{WindowsOuterWindowPlacement, WindowsWindowPlacementMonitor};
 
@@ -943,6 +949,18 @@ pub struct AtlasKindDiagnostic {
 }
 
 pub(crate) trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
+    #[cfg(target_os = "windows")]
+    fn lease_hidden_windows_window(
+        &mut self,
+    ) -> Result<(WindowsHiddenWindowLease, WindowsHiddenWindowLeaseReleased)> {
+        anyhow::bail!("native window operations are unsupported by this platform window")
+    }
+
+    #[cfg(target_os = "windows")]
+    fn windows_native_close_requested(&self) -> bool {
+        false
+    }
+
     fn bounds(&self) -> Bounds<Pixels>;
     fn is_maximized(&self) -> bool;
     fn window_bounds(&self) -> WindowBounds;
