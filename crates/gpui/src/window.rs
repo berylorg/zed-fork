@@ -1503,6 +1503,23 @@ impl Window {
 
     #[cfg(target_os = "windows")]
     #[allow(missing_docs)]
+    pub fn begin_windows_native_confirmation(
+        &mut self,
+        request: crate::WindowsNativeConfirmationRequest,
+    ) -> Result<(
+        crate::WindowsNativeConfirmation,
+        crate::WindowsNativeConfirmationCompleted,
+    )> {
+        anyhow::ensure!(
+            !self.removed && self.published,
+            "native confirmation requires a published, unremoved window"
+        );
+        self.platform_window
+            .begin_windows_native_confirmation(request)
+    }
+
+    #[cfg(target_os = "windows")]
+    #[allow(missing_docs)]
     pub fn observe_windows_native_destruction(
         &mut self,
     ) -> Result<crate::WindowsNativeWindowDestroyed> {

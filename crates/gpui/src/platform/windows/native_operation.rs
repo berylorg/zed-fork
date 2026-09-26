@@ -81,6 +81,39 @@ pub(super) struct NativeOperationState {
 }
 
 impl WindowsWindowInner {
+    pub(super) fn admit_native_confirmation(&self) -> Result<()> {
+        let state = self.native_operation.borrow();
+        ensure!(
+            !state.active
+                && !state.destroy_requested
+                && !state.native_destroyed
+                && !state.close_requested,
+            "native owner is unavailable for confirmation"
+        );
+        ensure!(
+            self.confirmation.borrow().is_none(),
+            "native owner already has a confirmation"
+        );
+        Ok(())
+    }
+
+    pub(super) fn finish_native_confirmation(self: &Rc<Self>) {
+        if self.native_operation.borrow().destroy_requested {
+            self.request_native_destruction();
+        }
+    }
+
+    pub(super) fn defer_confirmation_owner_close(&self) -> bool {
+        let confirmation = self.confirmation.borrow().clone();
+        if let Some(confirmation) = confirmation {
+            self.native_operation.borrow_mut().destroy_requested = true;
+            confirmation.cancel().log_err();
+            true
+        } else {
+            false
+        }
+    }
+
     pub(super) fn observe_native_destruction(&self) -> Result<WindowsNativeWindowDestroyed> {
         let mut state = self.native_operation.borrow_mut();
         ensure!(
@@ -202,6 +235,9 @@ impl WindowsWindowInner {
     }
 
     pub(super) fn request_native_destruction(self: &Rc<Self>) {
+        if self.defer_confirmation_owner_close() {
+            return;
+        }
         {
             let mut state = self.native_operation.borrow_mut();
             state.destroy_requested = true;
@@ -233,7 +269,7 @@ impl WindowsWindowInner {
                 return Ok(());
             }
             ensure!(
-                !state.active,
+                !state.active && self.confirmation.borrow().is_none(),
                 "native destruction cannot run during a worker operation"
             );
             state.destroy_scheduled = true;

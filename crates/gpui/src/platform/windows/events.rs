@@ -260,10 +260,19 @@ impl WindowsWindowInner {
         if self.latch_native_close_request() {
             return Some(0);
         }
-        let mut callback = self.state.borrow_mut().callbacks.should_close.take()?;
-        let should_close = callback();
-        self.state.borrow_mut().callbacks.should_close = Some(callback);
-        if should_close { None } else { Some(0) }
+        let callback = self.state.borrow_mut().callbacks.should_close.take();
+        let should_close = if let Some(mut callback) = callback {
+            let should_close = callback();
+            self.state.borrow_mut().callbacks.should_close = Some(callback);
+            should_close
+        } else {
+            true
+        };
+        if !should_close || self.defer_confirmation_owner_close() {
+            Some(0)
+        } else {
+            None
+        }
     }
 
     fn handle_destroy_msg(&self, handle: HWND) -> Option<isize> {

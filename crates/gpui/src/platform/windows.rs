@@ -1,4 +1,5 @@
 mod clipboard;
+mod confirmation;
 mod destination_list;
 mod direct_write;
 mod directx_atlas;
@@ -19,6 +20,12 @@ mod window;
 mod wrapper;
 
 pub(crate) use clipboard::*;
+#[cfg(feature = "test-support")]
+pub use confirmation::WindowsNativeConfirmationTestFault;
+pub use confirmation::{
+    WindowsNativeConfirmation, WindowsNativeConfirmationCompleted,
+    WindowsNativeConfirmationOutcome, WindowsNativeConfirmationRequest,
+};
 pub(crate) use destination_list::*;
 pub(crate) use direct_write::*;
 pub(crate) use directx_atlas::*;

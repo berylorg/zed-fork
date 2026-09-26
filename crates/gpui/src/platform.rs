@@ -24,12 +24,16 @@ mod test;
 mod windows;
 
 #[cfg(all(target_os = "windows", feature = "test-support"))]
+pub use windows::WindowsNativeConfirmationTestFault;
+#[cfg(all(target_os = "windows", feature = "test-support"))]
 pub use windows::with_windows_window_creation_hook_for_test;
 #[cfg(all(target_os = "windows", feature = "test-support"))]
 pub use windows::with_windows_window_destruction_observer_for_test;
 #[cfg(target_os = "windows")]
 pub use windows::{
     WindowsHiddenWindowLease, WindowsHiddenWindowLeaseRelease, WindowsHiddenWindowLeaseReleased,
+    WindowsNativeConfirmation, WindowsNativeConfirmationCompleted,
+    WindowsNativeConfirmationOutcome, WindowsNativeConfirmationRequest,
     WindowsNativeWindowDestroyed,
 };
 #[cfg(target_os = "windows")]
@@ -951,6 +955,16 @@ pub struct AtlasKindDiagnostic {
 }
 
 pub(crate) trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
+    #[cfg(target_os = "windows")]
+    fn begin_windows_native_confirmation(
+        &mut self,
+        _request: WindowsNativeConfirmationRequest,
+    ) -> Result<(
+        WindowsNativeConfirmation,
+        WindowsNativeConfirmationCompleted,
+    )> {
+        anyhow::bail!("native confirmation is unsupported by this platform window")
+    }
     #[cfg(target_os = "windows")]
     fn observe_windows_native_destruction(&mut self) -> Result<WindowsNativeWindowDestroyed> {
         anyhow::bail!("native destruction receipts are unsupported by this platform window")

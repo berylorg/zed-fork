@@ -69,6 +69,9 @@ at most one confirmation until its native operation has settled, including queue
 Duplicate creation refuses without changing the first operation. Reveal before creation retains
 one pending intent; cancellation before creation prevents exposure. Dropping the control requests
 cancellation; dropping the completion receiver neither confirms nor abandons native cleanup.
+An operating-system refusal to foreground an existing dialog is reported without replacing it or
+changing its confirmation authority. Queued creation rechecks that its exact owner remains visible
+and enabled before calling the native modal API.
 
 The operation retains the exact owner lifetime through native settlement. Owner removal cancels
 the dialog and defers owner destruction until that settlement. No command or callback targets a

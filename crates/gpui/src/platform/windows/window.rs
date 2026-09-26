@@ -64,6 +64,7 @@ pub struct WindowsWindowState {
 pub(crate) struct WindowsWindowInner {
     pub(super) hwnd: HWND,
     pub(super) native_operation: RefCell<super::native_operation::NativeOperationState>,
+    pub(super) confirmation: RefCell<Option<Rc<super::confirmation::ConfirmationState>>>,
     pub(super) this: Weak<Self>,
     drop_target_helper: IDropTargetHelper,
     pub(crate) state: RefCell<WindowsWindowState>,
@@ -229,6 +230,7 @@ impl WindowsWindowInner {
         Ok(Rc::new_cyclic(|this| Self {
             hwnd,
             native_operation: RefCell::new(Default::default()),
+            confirmation: RefCell::new(None),
             this: this.clone(),
             drop_target_helper: context.drop_target_helper.clone(),
             state,
@@ -661,6 +663,16 @@ impl Drop for WindowsWindow {
 impl PlatformWindow for WindowsWindow {
     fn observe_windows_native_destruction(&mut self) -> Result<WindowsNativeWindowDestroyed> {
         self.0.observe_native_destruction()
+    }
+
+    fn begin_windows_native_confirmation(
+        &mut self,
+        request: crate::WindowsNativeConfirmationRequest,
+    ) -> Result<(
+        crate::WindowsNativeConfirmation,
+        crate::WindowsNativeConfirmationCompleted,
+    )> {
+        self.0.begin_native_confirmation(request)
     }
 
     fn lease_hidden_windows_window(
