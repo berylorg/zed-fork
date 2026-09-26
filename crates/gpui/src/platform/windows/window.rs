@@ -659,6 +659,10 @@ impl Drop for WindowsWindow {
 }
 
 impl PlatformWindow for WindowsWindow {
+    fn observe_windows_native_destruction(&mut self) -> Result<WindowsNativeWindowDestroyed> {
+        self.0.observe_native_destruction()
+    }
+
     fn lease_hidden_windows_window(
         &mut self,
     ) -> Result<(WindowsHiddenWindowLease, WindowsHiddenWindowLeaseReleased)> {
@@ -1380,8 +1384,8 @@ unsafe extern "system" fn window_procedure(
     if ptr.is_null() {
         return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
     }
-    let inner = unsafe { &*ptr };
-    let result = if let Some(inner) = inner.upgrade() {
+    let inner = unsafe { &*ptr }.upgrade();
+    let result = if let Some(inner) = inner.as_ref() {
         inner.handle_msg(hwnd, msg, wparam, lparam)
     } else {
         unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
@@ -1390,6 +1394,9 @@ unsafe extern "system" fn window_procedure(
     if msg == WM_NCDESTROY {
         unsafe { set_window_long(hwnd, GWLP_USERDATA, 0) };
         unsafe { drop(Box::from_raw(ptr)) };
+        if let Some(inner) = inner {
+            inner.native_did_finish_destroy();
+        }
     }
 
     result

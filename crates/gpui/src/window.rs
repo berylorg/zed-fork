@@ -1503,6 +1503,15 @@ impl Window {
 
     #[cfg(target_os = "windows")]
     #[allow(missing_docs)]
+    pub fn observe_windows_native_destruction(
+        &mut self,
+    ) -> Result<crate::WindowsNativeWindowDestroyed> {
+        anyhow::ensure!(!self.removed, "native window is already removed");
+        self.platform_window.observe_windows_native_destruction()
+    }
+
+    #[cfg(target_os = "windows")]
+    #[allow(missing_docs)]
     pub fn lease_hidden_windows_window(
         &mut self,
     ) -> Result<(

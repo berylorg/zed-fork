@@ -37,6 +37,20 @@ pub struct WindowsHiddenWindowLeaseReleased {
     receiver: oneshot::Receiver<Result<WindowsHiddenWindowLeaseRelease>>,
 }
 
+pub struct WindowsNativeWindowDestroyed {
+    receiver: oneshot::Receiver<Result<()>>,
+}
+
+impl Future for WindowsNativeWindowDestroyed {
+    type Output = Result<()>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        Pin::new(&mut self.receiver)
+            .poll(cx)
+            .map(|result| result.context("native destruction completion authority was lost")?)
+    }
+}
+
 impl Future for WindowsHiddenWindowLeaseReleased {
     type Output = Result<WindowsHiddenWindowLeaseRelease>;
 
@@ -62,9 +76,27 @@ pub(super) struct NativeOperationState {
     destroy_requested: bool,
     destroy_scheduled: bool,
     native_destroyed: bool,
+    destruction_receipt_issued: bool,
+    destruction_completion: Option<oneshot::Sender<Result<()>>>,
 }
 
 impl WindowsWindowInner {
+    pub(super) fn observe_native_destruction(&self) -> Result<WindowsNativeWindowDestroyed> {
+        let mut state = self.native_operation.borrow_mut();
+        ensure!(
+            !state.native_destroyed,
+            "native window is already being destroyed or destroyed"
+        );
+        ensure!(
+            !state.destruction_receipt_issued,
+            "a native destruction receipt has already been issued for this window"
+        );
+        let (sender, receiver) = oneshot::channel();
+        state.destruction_receipt_issued = true;
+        state.destruction_completion = Some(sender);
+        Ok(WindowsNativeWindowDestroyed { receiver })
+    }
+
     pub(super) fn lease_hidden_native_window(
         self: &Rc<Self>,
     ) -> Result<(WindowsHiddenWindowLease, WindowsHiddenWindowLeaseReleased)> {
@@ -153,6 +185,22 @@ impl WindowsWindowInner {
         self.native_operation.borrow_mut().native_destroyed = true;
     }
 
+    pub(super) fn native_did_finish_destroy(&self) {
+        self.native_did_destroy();
+        self.complete_native_destruction(Ok(()));
+    }
+
+    fn complete_native_destruction(&self, result: Result<()>) {
+        let sender = self
+            .native_operation
+            .borrow_mut()
+            .destruction_completion
+            .take();
+        if let Some(sender) = sender {
+            let _ = sender.send(result);
+        }
+    }
+
     pub(super) fn request_native_destruction(self: &Rc<Self>) {
         {
             let mut state = self.native_operation.borrow_mut();
@@ -171,6 +219,14 @@ impl WindowsWindowInner {
     }
 
     fn destroy_native_window(&self) -> Result<()> {
+        let result = self.try_destroy_native_window();
+        if let Err(error) = &result {
+            self.complete_native_destruction(Err(anyhow::anyhow!("{error:#}")));
+        }
+        result
+    }
+
+    fn try_destroy_native_window(&self) -> Result<()> {
         {
             let mut state = self.native_operation.borrow_mut();
             if state.native_destroyed {

@@ -30,6 +30,7 @@ pub use windows::with_windows_window_destruction_observer_for_test;
 #[cfg(target_os = "windows")]
 pub use windows::{
     WindowsHiddenWindowLease, WindowsHiddenWindowLeaseRelease, WindowsHiddenWindowLeaseReleased,
+    WindowsNativeWindowDestroyed,
 };
 #[cfg(target_os = "windows")]
 pub use windows::{WindowsOuterWindowPlacement, WindowsWindowPlacementMonitor};
@@ -949,6 +950,11 @@ pub struct AtlasKindDiagnostic {
 }
 
 pub(crate) trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
+    #[cfg(target_os = "windows")]
+    fn observe_windows_native_destruction(&mut self) -> Result<WindowsNativeWindowDestroyed> {
+        anyhow::bail!("native destruction receipts are unsupported by this platform window")
+    }
+
     #[cfg(target_os = "windows")]
     fn lease_hidden_windows_window(
         &mut self,
