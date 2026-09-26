@@ -182,6 +182,20 @@ impl Application {
         self
     }
 
+    /// Configures automatic last-window quit before the application starts.
+    ///
+    /// `false` keeps the event loop running after the last window is destroyed, so
+    /// foreground cleanup and later window creation can continue. The default and
+    /// `true` preserve platform behavior; macOS already stays running without windows.
+    /// Explicit [`App::quit`] and operating-system termination remain unchanged.
+    pub fn with_quit_on_last_window_close(self, enabled: bool) -> Self {
+        self.0
+            .borrow()
+            .platform
+            .set_quit_on_last_window_close(enabled);
+        self
+    }
+
     /// Start the application. The provided callback will be called once the
     /// app is fully launched.
     pub fn run<F>(self, on_finish_launching: F)

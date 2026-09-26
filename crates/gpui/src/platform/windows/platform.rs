@@ -1,5 +1,5 @@
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     ffi::OsStr,
     mem::ManuallyDrop,
     path::{Path, PathBuf},
@@ -44,6 +44,7 @@ pub(crate) struct WindowsPlatform {
 
 struct WindowsPlatformInner {
     state: RefCell<WindowsPlatformState>,
+    quit_on_last_window_close: Cell<bool>,
     raw_window_handles: std::sync::Weak<RwLock<SmallVec<[SafeHwnd; 4]>>>,
     // The below members will never change throughout the entire lifecycle of the app.
     validation_number: usize,
@@ -319,6 +320,10 @@ impl Platform for WindowsPlatform {
         if let Some(ref mut callback) = self.inner.state.borrow_mut().callbacks.quit {
             callback();
         }
+    }
+
+    fn set_quit_on_last_window_close(&self, enabled: bool) {
+        self.inner.quit_on_last_window_close.set(enabled);
     }
 
     fn quit(&self) {
@@ -681,6 +686,7 @@ impl WindowsPlatformInner {
         ));
         Ok(Rc::new(Self {
             state,
+            quit_on_last_window_close: Cell::new(true),
             raw_window_handles: context.raw_window_handles.clone(),
             validation_number: context.validation_number,
             main_receiver: context.main_receiver.take().unwrap(),
@@ -716,7 +722,9 @@ impl WindowsPlatformInner {
         }
         match message {
             WM_GPUI_CLOSE_ONE_WINDOW => {
-                if self.close_one_window(HWND(lparam.0 as _)) {
+                if self.close_one_window(HWND(lparam.0 as _))
+                    && self.quit_on_last_window_close.get()
+                {
                     unsafe { PostQuitMessage(0) };
                 }
                 Some(0)

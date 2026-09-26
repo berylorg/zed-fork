@@ -15,6 +15,22 @@ gpui = { version = "*" }
 
 Everything in GPUI starts with an `Application`. You can create one with `Application::new()`, and kick off your application by passing a callback to `Application::run()`. Inside this callback, you can create a new window with `App::open_window()`, and register your first root view. See [gpui.rs](https://www.gpui.rs/) for a complete example.
 
+### Application lifetime
+
+Configure `Application::with_quit_on_last_window_close(false)` before `run` when cleanup or later
+window creation must continue after the final window is destroyed. Explicit `App::quit()` remains
+available. The default and `true` preserve each backend's existing automatic-exit behavior;
+macOS already stays running without windows.
+
+```rust,no_run
+gpui::Application::new()
+    .with_quit_on_last_window_close(false)
+    .run(|app| {
+        // The application owner calls this after its cleanup has completed.
+        app.quit();
+    });
+```
+
 ### Dependencies
 
 GPUI has various system dependencies that it needs in order to work.

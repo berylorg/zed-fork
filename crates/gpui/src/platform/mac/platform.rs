@@ -500,6 +500,8 @@ impl Platform for MacPlatform {
         }
     }
 
+    fn set_quit_on_last_window_close(&self, _: bool) {}
+
     fn quit(&self) {
         // Quitting the app causes us to close windows, which invokes `Window::on_close` callbacks
         // synchronously before this method terminates. If we call `Platform::quit` while holding a

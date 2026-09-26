@@ -255,6 +255,8 @@ impl Platform for TestPlatform {
         unimplemented!()
     }
 
+    fn set_quit_on_last_window_close(&self, _: bool) {}
+
     fn quit(&self) {}
 
     fn restart(&self, _: Option<PathBuf>) {

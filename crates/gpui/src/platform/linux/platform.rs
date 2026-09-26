@@ -94,6 +94,7 @@ pub(crate) struct PlatformHandlers {
 }
 
 pub(crate) struct LinuxCommon {
+    pub(crate) quit_on_last_window_close: bool,
     pub(crate) background_executor: BackgroundExecutor,
     pub(crate) foreground_executor: ForegroundExecutor,
     pub(crate) text_system: Arc<dyn PlatformTextSystem>,
@@ -120,6 +121,7 @@ impl LinuxCommon {
         let background_executor = BackgroundExecutor::new(dispatcher.clone());
 
         let common = LinuxCommon {
+            quit_on_last_window_close: true,
             background_executor,
             foreground_executor: ForegroundExecutor::new(dispatcher),
             text_system,
@@ -168,6 +170,10 @@ impl<P: LinuxClient + 'static> Platform for P {
         if let Some(mut fun) = quit {
             fun();
         }
+    }
+
+    fn set_quit_on_last_window_close(&self, enabled: bool) {
+        self.with_common(|common| common.quit_on_last_window_close = enabled);
     }
 
     fn quit(&self) {

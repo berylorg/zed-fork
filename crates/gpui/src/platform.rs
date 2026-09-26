@@ -179,6 +179,7 @@ pub(crate) trait Platform: 'static {
     fn text_system(&self) -> Arc<dyn PlatformTextSystem>;
 
     fn run(&self, on_finish_launching: Box<dyn 'static + FnOnce()>);
+    fn set_quit_on_last_window_close(&self, enabled: bool);
     fn quit(&self);
     fn restart(&self, binary_path: Option<PathBuf>);
     fn activate(&self, ignoring_other_apps: bool);

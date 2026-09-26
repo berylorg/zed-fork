@@ -22,6 +22,26 @@ Maintain a narrow Beryl-oriented fork of upstream Zed that carries targeted GPUI
 
 The fork exists for targeted GPUI changes needed by Beryl and should remain easy to compare with upstream Zed.
 
+## Application Lifetime After The Last Window Closes
+
+`Application::with_quit_on_last_window_close(bool)` is a startup-only option configured before
+`Application::run`. Passing `false` suppresses automatic event-loop termination caused solely by
+closing the final window. Native destruction, destruction notifications, foreground dispatch and
+later window creation continue normally, including an interval with zero windows. Consumers own
+their cleanup and eventually request explicit quit; the option creates no window or keep-alive
+token and adds no shutdown worker or callback protocol.
+
+The default and `true` preserve each backend's existing behavior: Windows, X11 and Wayland stop
+after the final window closes, while macOS and the test backend retain their existing behavior.
+Calling the builder repeatedly before launch uses the last value. There is no public runtime
+setter. Explicit `App::quit`, operating-system termination and platform-error handling are unchanged;
+this option is not a veto over explicit application or system shutdown.
+
+Native Windows verification must destroy the last window, observe its actual destruction, run a
+deferred continuation with no windows and create a successor before explicit quit. It must also
+prove default automatic exit and explicit quit with zero or remaining windows. Other native
+backends require equivalent source integration, with platform qualification recorded separately.
+
 ## Clone-Stable Scroll-Handle Identity
 
 GPUI `ScrollHandle` provides an app-neutral comparison that reports whether two handles share the
