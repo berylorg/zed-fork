@@ -42,6 +42,53 @@ deferred continuation with no windows and create a successor before explicit qui
 prove default automatic exit and explicit quit with zero or remaining windows. Other native
 backends require equivalent source integration, with platform qualification recorded separately.
 
+## Owned Native Confirmation On Windows
+
+### Foreground Progress During Native Modal Dispatch
+
+Windows foreground dispatch leaves not-yet-executed tasks reachable by nested native message
+dispatch. A native modal call made outside app/entity borrows cannot strand another queued task
+inside an outer dispatch batch. This applies to ordinary foreground work as well as confirmation
+cancellation and owner removal. Verification enters a nested native message pump with multiple
+tasks already queued and proves a later task runs before the first returns.
+
+### Confirmation Lifetime
+
+GPUI provides a Windows-native two-button confirmation owned by one live published window.
+The immutable request supplies a title, message, cancel label and affirmative label. UTF-8 byte
+limits are 256 for the title, 4096 for the message and 128 for each label; empty strings and
+embedded NUL are rejected before native creation. Cancel is explicitly the default. Escape,
+native close, owner removal and caller cancellation never produce an affirmative result.
+This boundary is separate from the existing generic prompt and never substitutes a GPUI overlay.
+Other platforms retain their existing prompt behavior; this Windows capability does not claim
+qualification of another native backend.
+
+Admission returns one move-only control and one completion future. The control can reveal the
+same dialog or request cancellation, but cannot select the affirmative action. One owner admits
+at most one confirmation until its native operation has settled, including queued creation.
+Duplicate creation refuses without changing the first operation. Reveal before creation retains
+one pending intent; cancellation before creation prevents exposure. Dropping the control requests
+cancellation; dropping the completion receiver neither confirms nor abandons native cleanup.
+
+The operation retains the exact owner lifetime through native settlement. Owner removal cancels
+the dialog and defers owner destruction until that settlement. No command or callback targets a
+recycled native handle. Native calls and nested message dispatch hold no GPUI entity borrow or
+confirmation-state borrow. Cancellation is sticky and wins over a later affirmative result.
+Native focus returns to the surviving owner after dismissal; the consumer retains its logical
+GPUI focus identity and restores it on cancellation.
+
+Completion reports Confirmed or Cancelled only after dialog destruction and return of the native
+modal call. Creation failure is an explicit error; missing destruction evidence after creation
+is an error that keeps owner destruction blocked. Neither channel loss nor an absent handle is
+successful disposal evidence. The implementation retains only one bounded request and fixed
+operation state per owner, with no command queue, background worker or global handle registry.
+
+Windows acceptance exercises real native creation, exact title and Cancel default, affirmative
+selection, Escape/dismissal, queued and active cancellation, duplicate refusal and reveal, owner
+removal, receiver/control drop, and destruction ordering. Failure injection covers native-open
+failure and lost settlement evidence. Independent lifecycle review checks callback reentrancy,
+native identity and the absence of unintended affirmative authority.
+
 ## Clone-Stable Scroll-Handle Identity
 
 GPUI `ScrollHandle` provides an app-neutral comparison that reports whether two handles share the

@@ -754,7 +754,11 @@ impl WindowsPlatformInner {
 
     #[inline]
     fn run_foreground_task(&self) -> Option<isize> {
-        for runnable in self.main_receiver.drain() {
+        let budget = self.main_receiver.len();
+        for _ in 0..budget {
+            let Ok(runnable) = self.main_receiver.try_recv() else {
+                break;
+            };
             runnable.run();
         }
         Some(0)
