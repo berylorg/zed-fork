@@ -4755,7 +4755,7 @@ impl Window {
     ) {
         let mut cx = self.to_async(cx);
         self.platform_window.on_should_close(Box::new(move || {
-            cx.update(|window, cx| f(window, cx)).unwrap_or(true)
+            cx.update(|window, cx| f(window, cx)).unwrap_or(false)
         }))
     }
 
