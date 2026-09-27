@@ -82,6 +82,7 @@ pub(super) struct ConfirmationState {
     created: Cell<bool>,
     destroyed: Cell<bool>,
     settled: Cell<bool>,
+    cleanup_settled: Cell<bool>,
 }
 
 impl ConfirmationState {
@@ -107,6 +108,10 @@ pub struct WindowsNativeConfirmation {
 }
 
 impl WindowsNativeConfirmation {
+    pub fn cleanup_settled(&self) -> bool {
+        self.state.cleanup_settled.get()
+    }
+
     pub fn reveal(&self) -> Result<()> {
         ensure!(
             !self.state.settled.get() && !self.state.cancelled.get(),
@@ -197,6 +202,7 @@ impl WindowsWindowInner {
                 operation.settled.set(true);
                 if !operation.created.get() || operation.destroyed.get() {
                     owner.confirmation.borrow_mut().take();
+                    operation.cleanup_settled.set(true);
                     owner.finish_native_confirmation();
                 }
                 let _ = sender.send(result);

@@ -86,6 +86,13 @@ is an error that keeps owner destruction blocked. Neither channel loss nor an ab
 successful disposal evidence. The implementation retains only one bounded request and fixed
 operation state per owner, with no command queue, background worker or global handle registry.
 
+The retained control exposes read-only cleanup-settlement evidence for its exact operation.
+It is false while queued, running or lacking destruction evidence. It becomes true only at the
+same native settlement boundary that releases the owner's confirmation exclusion, including a
+failed creation that left no native dialog. Completion failure and cleanup settlement remain
+separate facts; a consumer may release a failed attempt only when cleanup is proven complete.
+This evidence never conveys affirmative user intent and cannot reopen or destroy the owner.
+
 Windows acceptance exercises real native creation, exact title and Cancel default, affirmative
 selection, Escape/dismissal, queued and active cancellation, duplicate refusal and reveal, owner
 removal, receiver/control drop, and destruction ordering. Failure injection covers native-open
