@@ -1503,7 +1503,9 @@ impl Window {
 
     #[cfg(target_os = "windows")]
     #[allow(missing_docs)]
-    pub fn capture_windows_window_placement(&self) -> Result<crate::WindowsCapturedWindowPlacement> {
+    pub fn capture_windows_window_placement(
+        &self,
+    ) -> Result<crate::WindowsCapturedWindowPlacement> {
         anyhow::ensure!(
             !self.removed && self.published,
             "native placement capture requires a published, unremoved window"
@@ -1535,6 +1537,21 @@ impl Window {
     ) -> Result<crate::WindowsNativeWindowDestroyed> {
         anyhow::ensure!(!self.removed, "native window is already removed");
         self.platform_window.observe_windows_native_destruction()
+    }
+
+    #[cfg(target_os = "windows")]
+    #[allow(missing_docs)]
+    pub fn lease_published_windows_window(
+        &mut self,
+    ) -> Result<(
+        crate::WindowsPublishedWindowLease,
+        crate::WindowsPublishedWindowLeaseReleased,
+    )> {
+        anyhow::ensure!(
+            !self.removed && self.published,
+            "native observation requires a published, unremoved window"
+        );
+        self.platform_window.lease_published_windows_window()
     }
 
     #[cfg(target_os = "windows")]

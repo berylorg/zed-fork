@@ -268,7 +268,10 @@ impl WindowsWindowInner {
         } else {
             true
         };
-        if !should_close || self.defer_confirmation_owner_close() {
+        if !should_close
+            || self.defer_confirmation_owner_close()
+            || self.defer_leased_native_close()
+        {
             Some(0)
         } else {
             None

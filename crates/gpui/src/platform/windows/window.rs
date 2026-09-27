@@ -686,6 +686,20 @@ impl PlatformWindow for WindowsWindow {
         self.0.begin_native_confirmation(request)
     }
 
+    fn lease_published_windows_window(
+        &mut self,
+    ) -> Result<(
+        WindowsPublishedWindowLease,
+        WindowsPublishedWindowLeaseReleased,
+    )> {
+        anyhow::ensure!(
+            self.0.state.borrow().initial_placement.is_none()
+                && !self.0.state.borrow().is_fullscreen(),
+            "native observation requires a published non-fullscreen window"
+        );
+        self.0.lease_published_native_window()
+    }
+
     fn lease_hidden_windows_window(
         &mut self,
     ) -> Result<(WindowsHiddenWindowLease, WindowsHiddenWindowLeaseReleased)> {

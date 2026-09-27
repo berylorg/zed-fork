@@ -40,7 +40,8 @@ pub(crate) use keyboard::*;
 pub use native_operation::with_windows_window_destruction_observer_for_test;
 pub use native_operation::{
     WindowsHiddenWindowLease, WindowsHiddenWindowLeaseRelease, WindowsHiddenWindowLeaseReleased,
-    WindowsNativeWindowDestroyed,
+    WindowsNativeWindowDestroyed, WindowsPublishedWindowLease, WindowsPublishedWindowLeaseRelease,
+    WindowsPublishedWindowLeaseReleased,
 };
 pub use placement::{
     WindowsCapturedWindowPlacement, WindowsOuterWindowPlacement, WindowsWindowPlacementMonitor,

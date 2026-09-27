@@ -31,14 +31,15 @@ pub use windows::with_windows_window_creation_hook_for_test;
 pub use windows::with_windows_window_destruction_observer_for_test;
 #[cfg(target_os = "windows")]
 pub use windows::{
-    WindowsHiddenWindowLease, WindowsHiddenWindowLeaseRelease, WindowsHiddenWindowLeaseReleased,
-    WindowsNativeConfirmation, WindowsNativeConfirmationCompleted,
-    WindowsNativeConfirmationOutcome, WindowsNativeConfirmationRequest,
-    WindowsNativeWindowDestroyed,
+    WindowsCapturedWindowPlacement, WindowsOuterWindowPlacement, WindowsWindowPlacementMonitor,
 };
 #[cfg(target_os = "windows")]
 pub use windows::{
-    WindowsCapturedWindowPlacement, WindowsOuterWindowPlacement, WindowsWindowPlacementMonitor,
+    WindowsHiddenWindowLease, WindowsHiddenWindowLeaseRelease, WindowsHiddenWindowLeaseReleased,
+    WindowsNativeConfirmation, WindowsNativeConfirmationCompleted,
+    WindowsNativeConfirmationOutcome, WindowsNativeConfirmationRequest,
+    WindowsNativeWindowDestroyed, WindowsPublishedWindowLease, WindowsPublishedWindowLeaseRelease,
+    WindowsPublishedWindowLeaseReleased,
 };
 
 #[cfg(all(
@@ -975,6 +976,16 @@ pub(crate) trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     #[cfg(target_os = "windows")]
     fn observe_windows_native_destruction(&mut self) -> Result<WindowsNativeWindowDestroyed> {
         anyhow::bail!("native destruction receipts are unsupported by this platform window")
+    }
+
+    #[cfg(target_os = "windows")]
+    fn lease_published_windows_window(
+        &mut self,
+    ) -> Result<(
+        WindowsPublishedWindowLease,
+        WindowsPublishedWindowLeaseReleased,
+    )> {
+        anyhow::bail!("published native observation is unsupported on this platform")
     }
 
     #[cfg(target_os = "windows")]

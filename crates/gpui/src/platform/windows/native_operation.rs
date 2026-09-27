@@ -22,6 +22,14 @@ use windows::Win32::{
 use super::WindowsWindowInner;
 
 pub struct WindowsHiddenWindowLease {
+    inner: NativeWindowLease,
+}
+
+pub struct WindowsPublishedWindowLease {
+    inner: NativeWindowLease,
+}
+
+struct NativeWindowLease {
     handle: usize,
     _release: oneshot::Sender<()>,
     _not_sync: PhantomData<Cell<()>>,
@@ -29,12 +37,41 @@ pub struct WindowsHiddenWindowLease {
 
 impl WindowsHiddenWindowLease {
     pub fn raw_handle(&self) -> usize {
-        self.handle
+        self.inner.handle
+    }
+}
+
+impl WindowsPublishedWindowLease {
+    pub fn raw_handle(&self) -> usize {
+        self.inner.handle
     }
 }
 
 pub struct WindowsHiddenWindowLeaseReleased {
     receiver: oneshot::Receiver<Result<WindowsHiddenWindowLeaseRelease>>,
+}
+
+pub struct WindowsPublishedWindowLeaseReleased {
+    receiver: oneshot::Receiver<Result<WindowsHiddenWindowLeaseRelease>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WindowsPublishedWindowLeaseRelease {
+    pub native_destroyed: bool,
+}
+
+impl Future for WindowsPublishedWindowLeaseReleased {
+    type Output = Result<WindowsPublishedWindowLeaseRelease>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        Pin::new(&mut self.receiver).poll(cx).map(|result| {
+            let result = result
+                .context("native operation GUI completion ended without acknowledgement")??;
+            Ok(WindowsPublishedWindowLeaseRelease {
+                native_destroyed: result.native_destroyed,
+            })
+        })
+    }
 }
 
 pub struct WindowsNativeWindowDestroyed {
@@ -153,6 +190,52 @@ impl WindowsWindowInner {
             state.issued = true;
             state.active = true;
         }
+        let (inner, receiver) = self.start_native_operation();
+        Ok((
+            WindowsHiddenWindowLease { inner },
+            WindowsHiddenWindowLeaseReleased { receiver },
+        ))
+    }
+
+    pub(super) fn lease_published_native_window(
+        self: &Rc<Self>,
+    ) -> Result<(
+        WindowsPublishedWindowLease,
+        WindowsPublishedWindowLeaseReleased,
+    )> {
+        {
+            let mut state = self.native_operation.borrow_mut();
+            ensure!(
+                state.published
+                    && !state.active
+                    && !state.close_requested
+                    && !state.destroy_requested
+                    && !state.native_destroyed,
+                "native observation requires an available published window"
+            );
+            ensure!(
+                unsafe { IsWindowVisible(self.hwnd) }.as_bool(),
+                "native observation requires a visible window"
+            );
+            ensure!(
+                self.confirmation.borrow().is_none(),
+                "native observation owner has an active confirmation"
+            );
+            state.active = true;
+        }
+        let (inner, receiver) = self.start_native_operation();
+        Ok((
+            WindowsPublishedWindowLease { inner },
+            WindowsPublishedWindowLeaseReleased { receiver },
+        ))
+    }
+
+    fn start_native_operation(
+        self: &Rc<Self>,
+    ) -> (
+        NativeWindowLease,
+        oneshot::Receiver<Result<WindowsHiddenWindowLeaseRelease>>,
+    ) {
         let (release, released) = oneshot::channel();
         let (complete, completion) = oneshot::channel();
         let this = self.clone();
@@ -179,20 +262,28 @@ impl WindowsWindowInner {
                 let _ = complete.send(result);
             })
             .detach();
-        Ok((
-            WindowsHiddenWindowLease {
+        (
+            NativeWindowLease {
                 handle: self.hwnd.0 as usize,
                 _release: release,
                 _not_sync: PhantomData,
             },
-            WindowsHiddenWindowLeaseReleased {
-                receiver: completion,
-            },
-        ))
+            completion,
+        )
     }
 
     pub(super) fn native_close_requested(&self) -> bool {
         self.native_operation.borrow().close_requested
+    }
+
+    pub(super) fn defer_leased_native_close(&self) -> bool {
+        let mut state = self.native_operation.borrow_mut();
+        if state.active {
+            state.destroy_requested = true;
+            true
+        } else {
+            false
+        }
     }
 
     pub(super) fn native_exposure_blocked(&self) -> bool {
