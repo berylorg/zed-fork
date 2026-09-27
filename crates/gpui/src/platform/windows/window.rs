@@ -661,6 +661,17 @@ impl Drop for WindowsWindow {
 }
 
 impl PlatformWindow for WindowsWindow {
+    fn capture_windows_window_placement(&self) -> Result<crate::WindowsCapturedWindowPlacement> {
+        anyhow::ensure!(
+            !self.0.native_exposure_blocked()
+                && self.0.state.borrow().initial_placement.is_none()
+                && unsafe { IsWindowVisible(self.0.hwnd) }.as_bool()
+                && !self.0.state.borrow().is_fullscreen(),
+            "native placement capture requires a live published non-fullscreen window"
+        );
+        crate::WindowsCapturedWindowPlacement::capture(self.0.hwnd)
+    }
+
     fn observe_windows_native_destruction(&mut self) -> Result<WindowsNativeWindowDestroyed> {
         self.0.observe_native_destruction()
     }

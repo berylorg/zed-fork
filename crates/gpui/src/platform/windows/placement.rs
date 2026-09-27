@@ -15,7 +15,11 @@ use windows::Win32::{
     },
     UI::{
         HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI},
-        WindowsAndMessaging::USER_DEFAULT_SCREEN_DPI,
+        WindowsAndMessaging::{
+            GWL_EXSTYLE, GetWindowLongPtrW, GetWindowPlacement, SW_MINIMIZE, SW_SHOWMAXIMIZED,
+            SW_SHOWMINIMIZED, SW_SHOWMINNOACTIVE, USER_DEFAULT_SCREEN_DPI, WINDOWPLACEMENT,
+            WPF_RESTORETOMAXIMIZED, WS_EX_TOOLWINDOW,
+        },
     },
 };
 use windows::core::BOOL;
@@ -184,6 +188,34 @@ pub struct WindowsOuterWindowPlacement {
 }
 
 impl WindowsOuterWindowPlacement {
+    pub fn from_workspace_bounds(
+        bounds: Bounds<DevicePixels>,
+        monitor_bounds: Bounds<DevicePixels>,
+        work_area: Bounds<DevicePixels>,
+        tool_window: bool,
+    ) -> Result<Self> {
+        validate_work_area(monitor_bounds, work_area)?;
+        let workspace = bounds_rect(bounds)?;
+        let (dx, dy) = if tool_window {
+            (0, 0)
+        } else {
+            (
+                i64::from(work_area.origin.x.0) - i64::from(monitor_bounds.origin.x.0),
+                i64::from(work_area.origin.y.0) - i64::from(monitor_bounds.origin.y.0),
+            )
+        };
+        let screen_bounds = rect_bounds(RECT {
+            left: i32::try_from(i64::from(workspace.left) + dx)?,
+            top: i32::try_from(i64::from(workspace.top) + dy)?,
+            right: i32::try_from(i64::from(workspace.right) + dx)?,
+            bottom: i32::try_from(i64::from(workspace.bottom) + dy)?,
+        })?;
+        Ok(Self {
+            screen_bounds,
+            workspace_bounds: bounds,
+        })
+    }
+
     pub fn new(
         bounds: Bounds<Pixels>,
         scale_factor: f32,
@@ -241,6 +273,62 @@ impl WindowsOuterWindowPlacement {
     }
     pub fn workspace_bounds(&self) -> Bounds<DevicePixels> {
         self.workspace_bounds
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WindowsCapturedWindowPlacement {
+    normal_outer_bounds: Bounds<DevicePixels>,
+    maximized: bool,
+    monitor: WindowsWindowPlacementMonitor,
+}
+
+impl WindowsCapturedWindowPlacement {
+    pub fn normal_outer_bounds(&self) -> Bounds<DevicePixels> {
+        self.normal_outer_bounds
+    }
+
+    pub fn maximized(&self) -> bool {
+        self.maximized
+    }
+
+    pub fn monitor(&self) -> WindowsWindowPlacementMonitor {
+        self.monitor
+    }
+
+    pub(super) fn capture(hwnd: HWND) -> Result<Self> {
+        let handle = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONULL) };
+        let monitor = WindowsWindowPlacementMonitor::capture(handle)?;
+        let mut placement = WINDOWPLACEMENT {
+            length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
+            ..Default::default()
+        };
+        unsafe { GetWindowPlacement(hwnd, &mut placement) }
+            .context("capturing native normal window placement")?;
+        let tool_window =
+            unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) } as u32 & WS_EX_TOOLWINDOW.0 != 0;
+        let bounds = WindowsOuterWindowPlacement::from_workspace_bounds(
+            rect_bounds(placement.rcNormalPosition)?,
+            monitor.physical_bounds,
+            monitor.work_area,
+            tool_window,
+        )?;
+        ensure!(
+            unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONULL) } == handle
+                && unsafe { GetDpiForWindow(hwnd) } == monitor.dpi
+                && WindowsWindowPlacementMonitor::capture(handle)? == monitor,
+            "native monitor geometry or DPI changed during placement capture"
+        );
+        let minimized = [SW_SHOWMINIMIZED, SW_MINIMIZE, SW_SHOWMINNOACTIVE]
+            .iter()
+            .any(|state| placement.showCmd == state.0 as u32);
+        let maximized = placement.showCmd == SW_SHOWMAXIMIZED.0 as u32
+            || (minimized && placement.flags.0 & WPF_RESTORETOMAXIMIZED.0 != 0);
+        Ok(Self {
+            normal_outer_bounds: bounds.screen_bounds(),
+            maximized,
+            monitor,
+        })
     }
 }
 

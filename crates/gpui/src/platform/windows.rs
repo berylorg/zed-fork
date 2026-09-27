@@ -42,7 +42,9 @@ pub use native_operation::{
     WindowsHiddenWindowLease, WindowsHiddenWindowLeaseRelease, WindowsHiddenWindowLeaseReleased,
     WindowsNativeWindowDestroyed,
 };
-pub use placement::{WindowsOuterWindowPlacement, WindowsWindowPlacementMonitor};
+pub use placement::{
+    WindowsCapturedWindowPlacement, WindowsOuterWindowPlacement, WindowsWindowPlacementMonitor,
+};
 pub(crate) use platform::*;
 pub(crate) use system_settings::*;
 pub(crate) use util::*;

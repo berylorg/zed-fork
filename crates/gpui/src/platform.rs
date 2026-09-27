@@ -37,7 +37,9 @@ pub use windows::{
     WindowsNativeWindowDestroyed,
 };
 #[cfg(target_os = "windows")]
-pub use windows::{WindowsOuterWindowPlacement, WindowsWindowPlacementMonitor};
+pub use windows::{
+    WindowsCapturedWindowPlacement, WindowsOuterWindowPlacement, WindowsWindowPlacementMonitor,
+};
 
 #[cfg(all(
     feature = "screen-capture",
@@ -955,6 +957,11 @@ pub struct AtlasKindDiagnostic {
 }
 
 pub(crate) trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
+    #[cfg(target_os = "windows")]
+    fn capture_windows_window_placement(&self) -> Result<WindowsCapturedWindowPlacement> {
+        anyhow::bail!("native placement capture is unsupported by this platform window")
+    }
+
     #[cfg(target_os = "windows")]
     fn begin_windows_native_confirmation(
         &mut self,

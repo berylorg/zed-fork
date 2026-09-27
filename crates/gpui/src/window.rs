@@ -1503,6 +1503,16 @@ impl Window {
 
     #[cfg(target_os = "windows")]
     #[allow(missing_docs)]
+    pub fn capture_windows_window_placement(&self) -> Result<crate::WindowsCapturedWindowPlacement> {
+        anyhow::ensure!(
+            !self.removed && self.published,
+            "native placement capture requires a published, unremoved window"
+        );
+        self.platform_window.capture_windows_window_placement()
+    }
+
+    #[cfg(target_os = "windows")]
+    #[allow(missing_docs)]
     pub fn begin_windows_native_confirmation(
         &mut self,
         request: crate::WindowsNativeConfirmationRequest,
