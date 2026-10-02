@@ -99,6 +99,38 @@ removal, receiver/control drop, and destruction ordering. Failure injection cove
 failure and lost settlement evidence. Independent lifecycle review checks callback reentrancy,
 native identity and the absence of unintended affirmative authority.
 
+## Recoverable Native Window Destruction On Windows
+
+GPUI exposes a separate owned destruction attempt for a live published Windows window. Admission
+retains the exact GPUI window slot, root, platform wrapper and native identity until native
+settlement. It does not mark the window removed, emit window-closed notification or relinquish
+its wrapper before destruction is proven. Consumers supply their own interaction and durable-state
+fences; this boundary does not authorize saving, application shutdown or process termination.
+
+Each window admits at most one attempt. Native dispatch and confirmation cancellation settle
+without GPUI/entity borrows held. The result distinguishes proven destruction from settled failure
+with the same surviving window and from unresolved native settlement. Surviving failure requires
+proof that no queued or active destruction for that attempt can later remove the window. An error
+string, absent handle or lost receiver is not settlement. Retain exact operation identity and
+custody across receiver drop, duplicate calls and delayed callbacks; no recycled handle is targeted.
+Early native destruction callbacks cannot remove the GPUI slot ahead of terminal native settlement.
+Partial native teardown cannot produce a surviving-window result. Every fresh admitted attempt
+has independent completion identity; stale completion cannot settle or remove its successor.
+
+Proven destruction removes the exact GPUI slot and emits its close notification once, then releases
+the retained wrapper without requesting destruction again. Settled surviving failure leaves the
+same GPUI/native window available for consumer restoration and permits a separately activated fresh
+attempt. An unresolved attempt keeps its bounded custody and excludes another attempt. Ordinary
+window removal and owner-drop cleanup must not bypass an active attempt or schedule duplicate
+destruction. No background worker, unbounded registry or automatic destruction retry is introduced.
+
+The existing irreversible removal path retains its contract for consumers that do not request this
+capability. Other backends explicitly refuse unsupported admission without removing a window.
+Windows native verification covers a real successful destruction, injected DestroyWindow refusal
+with exact surviving window/root identity, then fresh successful destruction; queued/in-flight
+confirmation cancellation, duplicate/stale callbacks and receiver abandonment; and one close
+notification only after actual destruction. Independently review reentrancy, custody and identity.
+
 ## Clone-Stable Scroll-Handle Identity
 
 GPUI `ScrollHandle` provides an app-neutral comparison that reports whether two handles share the
