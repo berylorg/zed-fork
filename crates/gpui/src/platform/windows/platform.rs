@@ -4,7 +4,10 @@ use std::{
     mem::ManuallyDrop,
     path::{Path, PathBuf},
     rc::{Rc, Weak},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use ::util::{ResultExt, paths::SanitizedPath};
@@ -45,6 +48,8 @@ pub(crate) struct WindowsPlatform {
 struct WindowsPlatformInner {
     state: RefCell<WindowsPlatformState>,
     quit_on_last_window_close: Cell<bool>,
+    unsettled_recoverable_windows: Cell<usize>,
+    redraw_pending: Arc<AtomicBool>,
     raw_window_handles: std::sync::Weak<RwLock<SmallVec<[SafeHwnd; 4]>>>,
     // The below members will never change throughout the entire lifecycle of the app.
     validation_number: usize,
@@ -244,6 +249,7 @@ impl WindowsPlatform {
         let validation_number = self.inner.validation_number;
         let all_windows = Arc::downgrade(&self.raw_window_handles);
         let text_system = Arc::downgrade(&self.text_system);
+        let redraw_pending = self.inner.redraw_pending.clone();
         std::thread::Builder::new()
             .name("VSyncProvider".to_owned())
             .spawn(move || {
@@ -262,9 +268,19 @@ impl WindowsPlatform {
                     let Some(all_windows) = all_windows.upgrade() else {
                         break;
                     };
-                    for hwnd in all_windows.read().iter() {
-                        unsafe {
-                            let _ = RedrawWindow(Some(hwnd.as_raw()), None, None, RDW_INVALIDATE);
+                    drop(all_windows);
+                    if !redraw_pending.swap(true, Ordering::AcqRel) {
+                        if unsafe {
+                            PostMessageW(
+                                Some(platform_window.as_raw()),
+                                WM_GPUI_REDRAW_NATIVE_WINDOWS,
+                                WPARAM(validation_number),
+                                LPARAM(0),
+                            )
+                        }
+                        .is_err()
+                        {
+                            redraw_pending.store(false, Ordering::Release);
                         }
                     }
                 }
@@ -687,6 +703,8 @@ impl WindowsPlatformInner {
         Ok(Rc::new(Self {
             state,
             quit_on_last_window_close: Cell::new(true),
+            unsettled_recoverable_windows: Cell::new(0),
+            redraw_pending: Arc::new(AtomicBool::new(false)),
             raw_window_handles: context.raw_window_handles.clone(),
             validation_number: context.validation_number,
             main_receiver: context.main_receiver.take().unwrap(),
@@ -702,6 +720,9 @@ impl WindowsPlatformInner {
     ) -> LRESULT {
         let handled = match msg {
             WM_GPUI_CLOSE_ONE_WINDOW
+            | WM_GPUI_RECOVERABLE_WINDOW_CLOSED
+            | WM_GPUI_RETIRE_NATIVE_WINDOW
+            | WM_GPUI_REDRAW_NATIVE_WINDOWS
             | WM_GPUI_TASK_DISPATCHED_ON_MAIN_THREAD
             | WM_GPUI_DOCK_MENU_ACTION
             | WM_GPUI_KEYBOARD_LAYOUT_CHANGED
@@ -721,8 +742,48 @@ impl WindowsPlatformInner {
             return None;
         }
         match message {
+            WM_GPUI_RETIRE_NATIVE_WINDOW => {
+                if let Some(windows) = self.raw_window_handles.upgrade() {
+                    let mut windows = windows.write();
+                    if let Some(index) = windows
+                        .iter()
+                        .position(|entry| entry.as_raw() == HWND(lparam.0 as _))
+                    {
+                        windows.remove(index);
+                        self.unsettled_recoverable_windows
+                            .set(self.unsettled_recoverable_windows.get() + 1);
+                    }
+                }
+                Some(0)
+            }
+            WM_GPUI_REDRAW_NATIVE_WINDOWS => {
+                if lparam.0 == 0 {
+                    self.redraw_pending.store(false, Ordering::Release);
+                }
+                self.redraw_native_windows(lparam.0 != 0);
+                Some(0)
+            }
+            WM_GPUI_RECOVERABLE_WINDOW_CLOSED => {
+                self.unsettled_recoverable_windows.set(
+                    self.unsettled_recoverable_windows
+                        .get()
+                        .checked_sub(1)
+                        .expect("recoverable native settlement without retirement"),
+                );
+                if self
+                    .raw_window_handles
+                    .upgrade()
+                    .is_some_and(|windows| windows.read().is_empty())
+                    && self.unsettled_recoverable_windows.get() == 0
+                    && self.quit_on_last_window_close.get()
+                {
+                    unsafe { PostQuitMessage(0) };
+                }
+                Some(0)
+            }
             WM_GPUI_CLOSE_ONE_WINDOW => {
                 if self.close_one_window(HWND(lparam.0 as _))
+                    && self.unsettled_recoverable_windows.get() == 0
                     && self.quit_on_last_window_close.get()
                 {
                     unsafe { PostQuitMessage(0) };
@@ -803,8 +864,54 @@ impl WindowsPlatformInner {
             ManuallyDrop::drop(&mut lock.directx_devices);
         }
         lock.directx_devices = ManuallyDrop::new(directx_devices.clone());
+        drop(lock);
+        for window in self.native_window_snapshot() {
+            if !window.native_operation.borrow().native_destroyed {
+                unsafe {
+                    SendMessageW(
+                        window.hwnd,
+                        WM_GPUI_GPU_DEVICE_LOST,
+                        Some(WPARAM(self.validation_number)),
+                        Some(lparam),
+                    )
+                };
+            }
+        }
 
         Some(0)
+    }
+
+    fn native_window_snapshot(&self) -> Vec<Rc<WindowsWindowInner>> {
+        self.raw_window_handles
+            .upgrade()
+            .map(|windows| {
+                windows
+                    .read()
+                    .iter()
+                    .filter_map(|entry| window_from_hwnd(entry.as_raw()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn redraw_native_windows(&self, force_render: bool) {
+        for window in self.native_window_snapshot() {
+            if window.native_operation.borrow().native_destroyed {
+                continue;
+            }
+            unsafe {
+                if force_render {
+                    SendMessageW(
+                        window.hwnd,
+                        WM_GPUI_FORCE_UPDATE_WINDOW,
+                        Some(WPARAM(self.validation_number)),
+                        None,
+                    );
+                } else {
+                    let _ = RedrawWindow(Some(window.hwnd), None, None, RDW_INVALIDATE);
+                }
+            }
+        }
     }
 }
 
@@ -1080,28 +1187,16 @@ fn handle_gpu_device_lost(
     if let Some(text_system) = text_system.upgrade() {
         text_system.handle_gpu_lost(&directx_devices);
     }
-    if let Some(all_windows) = all_windows.upgrade() {
-        for window in all_windows.read().iter() {
-            unsafe {
-                SendMessageW(
-                    window.as_raw(),
-                    WM_GPUI_GPU_DEVICE_LOST,
-                    Some(WPARAM(validation_number)),
-                    Some(LPARAM(directx_devices as *const _ as _)),
-                );
-            }
-        }
+    if all_windows.upgrade().is_some() {
         std::thread::sleep(std::time::Duration::from_millis(200));
-        for window in all_windows.read().iter() {
-            unsafe {
-                SendMessageW(
-                    window.as_raw(),
-                    WM_GPUI_FORCE_UPDATE_WINDOW,
-                    Some(WPARAM(validation_number)),
-                    None,
-                );
-            }
-        }
+        unsafe {
+            SendMessageW(
+                platform_window,
+                WM_GPUI_REDRAW_NATIVE_WINDOWS,
+                Some(WPARAM(validation_number)),
+                Some(LPARAM(1)),
+            )
+        };
     }
 }
 

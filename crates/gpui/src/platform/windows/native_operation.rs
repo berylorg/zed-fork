@@ -107,12 +107,13 @@ pub struct WindowsHiddenWindowLeaseRelease {
 #[derive(Default)]
 pub(super) struct NativeOperationState {
     issued: bool,
-    active: bool,
-    published: bool,
+    pub(super) active: bool,
+    pub(super) published: bool,
     close_requested: bool,
-    destroy_requested: bool,
-    destroy_scheduled: bool,
-    native_destroyed: bool,
+    pub(super) destroy_requested: bool,
+    pub(super) destroy_scheduled: bool,
+    pub(super) native_destroyed: bool,
+    pub(super) native_destroy_finished: bool,
     destruction_receipt_issued: bool,
     destruction_completion: Option<oneshot::Sender<Result<()>>>,
 }
@@ -311,6 +312,7 @@ impl WindowsWindowInner {
 
     pub(super) fn native_did_finish_destroy(&self) {
         self.native_did_destroy();
+        self.native_operation.borrow_mut().native_destroy_finished = true;
         self.complete_native_destruction(Ok(()));
     }
 
@@ -326,6 +328,10 @@ impl WindowsWindowInner {
     }
 
     pub(super) fn request_native_destruction(self: &Rc<Self>) {
+        if self.recoverable_destruction.borrow().is_some() {
+            self.dispatch_recoverable_destruction();
+            return;
+        }
         if self.defer_confirmation_owner_close() {
             return;
         }

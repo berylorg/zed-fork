@@ -13,6 +13,7 @@ mod keyboard;
 mod native_operation;
 mod placement;
 mod platform;
+mod recoverable_destruction;
 mod system_settings;
 mod util;
 mod vsync;
@@ -47,6 +48,14 @@ pub use placement::{
     WindowsCapturedWindowPlacement, WindowsOuterWindowPlacement, WindowsWindowPlacementMonitor,
 };
 pub(crate) use platform::*;
+pub use recoverable_destruction::{
+    WindowsNativeWindowDestruction, WindowsNativeWindowDestructionCompleted,
+    WindowsNativeWindowDestructionOutcome,
+};
+#[cfg(feature = "test-support")]
+pub use recoverable_destruction::{
+    WindowsNativeWindowDestructionTestFault, with_windows_window_destruction_fault_for_test,
+};
 pub(crate) use system_settings::*;
 pub(crate) use util::*;
 pub(crate) use vsync::*;

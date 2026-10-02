@@ -26,6 +26,9 @@ pub(crate) const WM_GPUI_DOCK_MENU_ACTION: u32 = WM_USER + 4;
 pub(crate) const WM_GPUI_FORCE_UPDATE_WINDOW: u32 = WM_USER + 5;
 pub(crate) const WM_GPUI_KEYBOARD_LAYOUT_CHANGED: u32 = WM_USER + 6;
 pub(crate) const WM_GPUI_GPU_DEVICE_LOST: u32 = WM_USER + 7;
+pub(crate) const WM_GPUI_RECOVERABLE_WINDOW_CLOSED: u32 = WM_USER + 8;
+pub(crate) const WM_GPUI_RETIRE_NATIVE_WINDOW: u32 = WM_USER + 9;
+pub(crate) const WM_GPUI_REDRAW_NATIVE_WINDOWS: u32 = WM_USER + 10;
 
 const SIZE_MOVE_LOOP_TIMER_ID: usize = 1;
 const AUTO_HIDE_TASKBAR_THICKNESS_PX: i32 = 1;
@@ -38,6 +41,9 @@ impl WindowsWindowInner {
         wparam: WPARAM,
         lparam: LPARAM,
     ) -> LRESULT {
+        if self.native_operation.borrow().native_destroyed {
+            return unsafe { DefWindowProcW(handle, msg, wparam, lparam) };
+        }
         let handled = match msg {
             WM_ACTIVATE => self.handle_activate_msg(wparam),
             WM_CREATE => self.handle_create_msg(handle),
@@ -257,6 +263,9 @@ impl WindowsWindowInner {
     }
 
     fn handle_close_msg(&self) -> Option<isize> {
+        if self.recoverable_destruction_blocks_removal() {
+            return Some(0);
+        }
         if self.latch_native_close_request() {
             return Some(0);
         }
@@ -280,6 +289,28 @@ impl WindowsWindowInner {
 
     fn handle_destroy_msg(&self, handle: HWND) -> Option<isize> {
         self.native_did_destroy();
+        if self.recoverable_destruction.borrow().is_some() {
+            unsafe {
+                SendMessageW(
+                    self.platform_window_handle,
+                    WM_GPUI_RETIRE_NATIVE_WINDOW,
+                    Some(WPARAM(self.validation_number)),
+                    Some(LPARAM(handle.0 as isize)),
+                )
+            };
+            unsafe { windows::Win32::System::Ole::RevokeDragDrop(handle) }.log_err();
+            return Some(0);
+        }
+        self.notify_native_window_closed(handle);
+        Some(0)
+    }
+
+    pub(super) fn notify_native_window_closed(&self, handle: HWND) {
+        let message = if self.recoverable_destruction.borrow().is_some() {
+            WM_GPUI_RECOVERABLE_WINDOW_CLOSED
+        } else {
+            WM_GPUI_CLOSE_ONE_WINDOW
+        };
         let callback = {
             let mut lock = self.state.borrow_mut();
             lock.callbacks.close.take()
@@ -290,13 +321,12 @@ impl WindowsWindowInner {
         unsafe {
             PostMessageW(
                 Some(self.platform_window_handle),
-                WM_GPUI_CLOSE_ONE_WINDOW,
+                message,
                 WPARAM(self.validation_number),
                 LPARAM(handle.0 as isize),
             )
             .log_err();
         }
-        Some(0)
     }
 
     fn handle_mouse_move_msg(&self, handle: HWND, lparam: LPARAM, wparam: WPARAM) -> Option<isize> {
@@ -1229,6 +1259,9 @@ impl WindowsWindowInner {
 
     #[inline]
     fn draw_window(&self, handle: HWND, force_render: bool) -> Option<isize> {
+        if self.native_operation.borrow().native_destroyed {
+            return Some(0);
+        }
         let mut request_frame = self.state.borrow_mut().callbacks.request_frame.take()?;
         request_frame(RequestFrameOptions {
             require_presentation: false,

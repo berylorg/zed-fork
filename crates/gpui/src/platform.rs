@@ -38,8 +38,14 @@ pub use windows::{
     WindowsHiddenWindowLease, WindowsHiddenWindowLeaseRelease, WindowsHiddenWindowLeaseReleased,
     WindowsNativeConfirmation, WindowsNativeConfirmationCompleted,
     WindowsNativeConfirmationOutcome, WindowsNativeConfirmationRequest,
-    WindowsNativeWindowDestroyed, WindowsPublishedWindowLease, WindowsPublishedWindowLeaseRelease,
+    WindowsNativeWindowDestroyed, WindowsNativeWindowDestruction,
+    WindowsNativeWindowDestructionCompleted, WindowsNativeWindowDestructionOutcome,
+    WindowsPublishedWindowLease, WindowsPublishedWindowLeaseRelease,
     WindowsPublishedWindowLeaseReleased,
+};
+#[cfg(all(target_os = "windows", feature = "test-support"))]
+pub use windows::{
+    WindowsNativeWindowDestructionTestFault, with_windows_window_destruction_fault_for_test,
 };
 
 #[cfg(all(
@@ -958,6 +964,20 @@ pub struct AtlasKindDiagnostic {
 }
 
 pub(crate) trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
+    fn recoverable_destruction_blocks_removal(&self) -> bool {
+        false
+    }
+
+    #[cfg(target_os = "windows")]
+    fn begin_windows_native_destruction(
+        &mut self,
+    ) -> Result<(
+        WindowsNativeWindowDestruction,
+        WindowsNativeWindowDestructionCompleted,
+    )> {
+        anyhow::bail!("recoverable native destruction is unsupported by this platform window")
+    }
+
     #[cfg(target_os = "windows")]
     fn capture_windows_window_placement(&self) -> Result<WindowsCapturedWindowPlacement> {
         anyhow::bail!("native placement capture is unsupported by this platform window")

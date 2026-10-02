@@ -65,6 +65,8 @@ pub(crate) struct WindowsWindowInner {
     pub(super) hwnd: HWND,
     pub(super) native_operation: RefCell<super::native_operation::NativeOperationState>,
     pub(super) confirmation: RefCell<Option<Rc<super::confirmation::ConfirmationState>>>,
+    pub(super) recoverable_destruction:
+        RefCell<Option<Rc<super::recoverable_destruction::DestructionState>>>,
     pub(super) this: Weak<Self>,
     drop_target_helper: IDropTargetHelper,
     pub(crate) state: RefCell<WindowsWindowState>,
@@ -231,6 +233,7 @@ impl WindowsWindowInner {
             hwnd,
             native_operation: RefCell::new(Default::default()),
             confirmation: RefCell::new(None),
+            recoverable_destruction: RefCell::new(None),
             this: this.clone(),
             drop_target_helper: context.drop_target_helper.clone(),
             state,
@@ -639,6 +642,9 @@ impl WindowsWindow {
 
 impl rwh::HasWindowHandle for WindowsWindow {
     fn window_handle(&self) -> std::result::Result<rwh::WindowHandle<'_>, rwh::HandleError> {
+        if self.0.native_operation.borrow().native_destroyed {
+            return Err(rwh::HandleError::Unavailable);
+        }
         let raw = rwh::Win32WindowHandle::new(unsafe {
             NonZeroIsize::new_unchecked(self.0.hwnd.0 as isize)
         })
@@ -661,6 +667,19 @@ impl Drop for WindowsWindow {
 }
 
 impl PlatformWindow for WindowsWindow {
+    fn recoverable_destruction_blocks_removal(&self) -> bool {
+        self.0.recoverable_destruction_blocks_removal()
+    }
+
+    fn begin_windows_native_destruction(
+        &mut self,
+    ) -> Result<(
+        WindowsNativeWindowDestruction,
+        WindowsNativeWindowDestructionCompleted,
+    )> {
+        self.0.begin_recoverable_destruction()
+    }
+
     fn capture_windows_window_placement(&self) -> Result<crate::WindowsCapturedWindowPlacement> {
         anyhow::ensure!(
             !self.0.native_exposure_blocked()
@@ -719,10 +738,16 @@ impl PlatformWindow for WindowsWindow {
     }
 
     fn is_maximized(&self) -> bool {
+        if self.0.native_operation.borrow().native_destroyed {
+            return false;
+        }
         self.0.state.borrow().is_maximized()
     }
 
     fn window_bounds(&self) -> WindowBounds {
+        if self.0.native_operation.borrow().native_destroyed {
+            return WindowBounds::Windowed(self.bounds());
+        }
         self.0.state.borrow().window_bounds()
     }
 
@@ -735,6 +760,10 @@ impl PlatformWindow for WindowsWindow {
     }
 
     fn resize(&mut self, size: Size<Pixels>) {
+        if self.0.native_exposure_blocked() {
+            return;
+        }
+        let owner = self.0.clone();
         let hwnd = self.0.hwnd;
         let bounds =
             crate::bounds(self.bounds().origin, size).to_device_pixels(self.scale_factor());
@@ -743,6 +772,9 @@ impl PlatformWindow for WindowsWindow {
         self.0
             .executor
             .spawn(async move {
+                if owner.native_exposure_blocked() {
+                    return;
+                }
                 unsafe {
                     SetWindowPos(
                         hwnd,
@@ -773,6 +805,9 @@ impl PlatformWindow for WindowsWindow {
     }
 
     fn mouse_position(&self) -> Point<Pixels> {
+        if self.0.native_operation.borrow().native_destroyed {
+            return Point::default();
+        }
         let scale_factor = self.scale_factor();
         let point = unsafe {
             let mut point: POINT = std::mem::zeroed();
@@ -808,6 +843,10 @@ impl PlatformWindow for WindowsWindow {
         detail: Option<&str>,
         answers: &[PromptButton],
     ) -> Option<Receiver<usize>> {
+        if self.0.native_exposure_blocked() {
+            return None;
+        }
+        let owner = self.0.clone();
         let (done_tx, done_rx) = oneshot::channel();
         let msg = msg.to_string();
         let detail_string = detail.map(|detail| detail.to_string());
@@ -816,6 +855,9 @@ impl PlatformWindow for WindowsWindow {
         self.0
             .executor
             .spawn(async move {
+                if owner.native_exposure_blocked() {
+                    return;
+                }
                 unsafe {
                     let mut config = TASKDIALOGCONFIG::default();
                     config.cbSize = std::mem::size_of::<TASKDIALOGCONFIG>() as _;
@@ -943,6 +985,9 @@ impl PlatformWindow for WindowsWindow {
     }
 
     fn is_active(&self) -> bool {
+        if self.0.native_operation.borrow().native_destroyed {
+            return false;
+        }
         self.0.hwnd == unsafe { GetActiveWindow() }
     }
 
@@ -951,6 +996,9 @@ impl PlatformWindow for WindowsWindow {
     }
 
     fn set_title(&mut self, title: &str) {
+        if self.0.native_exposure_blocked() {
+            return;
+        }
         unsafe { SetWindowTextW(self.0.hwnd, &HSTRING::from(title)) }
             .inspect_err(|e| log::error!("Set title failed: {e}"))
             .ok();
@@ -969,6 +1017,9 @@ impl PlatformWindow for WindowsWindow {
     }
 
     fn set_background_appearance(&self, background_appearance: WindowBackgroundAppearance) {
+        if self.0.native_exposure_blocked() {
+            return;
+        }
         let hwnd = self.0.hwnd;
 
         match background_appearance {
@@ -1064,6 +1115,9 @@ impl PlatformWindow for WindowsWindow {
     }
 
     fn draw(&self, scene: &Scene) {
+        if self.0.native_operation.borrow().native_destroyed {
+            return;
+        }
         self.0.state.borrow_mut().renderer.draw(scene).log_err();
     }
 
@@ -1080,6 +1134,9 @@ impl PlatformWindow for WindowsWindow {
     }
 
     fn get_raw_handle(&self) -> HWND {
+        if self.0.native_operation.borrow().native_destroyed {
+            return HWND::default();
+        }
         self.0.hwnd
     }
 
@@ -1097,6 +1154,9 @@ struct WindowsDragDropHandler(pub Rc<WindowsWindowInner>);
 
 impl WindowsDragDropHandler {
     fn handle_drag_drop(&self, input: PlatformInput) {
+        if self.0.native_operation.borrow().native_destroyed {
+            return;
+        }
         let mut lock = self.0.state.borrow_mut();
         if let Some(mut func) = lock.callbacks.input.take() {
             drop(lock);
@@ -1115,6 +1175,9 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
         pt: &POINTL,
         pdweffect: *mut DROPEFFECT,
     ) -> windows::core::Result<()> {
+        if self.0.native_operation.borrow().native_destroyed {
+            return Ok(());
+        }
         unsafe {
             let idata_obj = pdataobj.ok()?;
             let config = FORMATETC {
@@ -1172,6 +1235,9 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
         pt: &POINTL,
         pdweffect: *mut DROPEFFECT,
     ) -> windows::core::Result<()> {
+        if self.0.native_operation.borrow().native_destroyed {
+            return Ok(());
+        }
         let mut cursor_position = POINT { x: pt.x, y: pt.y };
         unsafe {
             *pdweffect = DROPEFFECT_COPY;
@@ -1197,6 +1263,9 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
     }
 
     fn DragLeave(&self) -> windows::core::Result<()> {
+        if self.0.native_operation.borrow().native_destroyed {
+            return Ok(());
+        }
         unsafe {
             self.0.drop_target_helper.DragLeave().log_err();
         }
@@ -1213,6 +1282,9 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
         pt: &POINTL,
         pdweffect: *mut DROPEFFECT,
     ) -> windows::core::Result<()> {
+        if self.0.native_operation.borrow().native_destroyed {
+            return Ok(());
+        }
         let idata_obj = pdataobj.ok()?;
         let mut cursor_position = POINT { x: pt.x, y: pt.y };
         unsafe {

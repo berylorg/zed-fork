@@ -1498,7 +1498,28 @@ impl Window {
 
     /// Close this window.
     pub fn remove_window(&mut self) {
+        if self
+            .platform_window
+            .recoverable_destruction_blocks_removal()
+        {
+            return;
+        }
         self.removed = true;
+    }
+
+    #[cfg(target_os = "windows")]
+    #[allow(missing_docs)]
+    pub fn begin_windows_native_destruction(
+        &mut self,
+    ) -> Result<(
+        crate::WindowsNativeWindowDestruction,
+        crate::WindowsNativeWindowDestructionCompleted,
+    )> {
+        anyhow::ensure!(
+            !self.removed && self.published,
+            "recoverable native destruction requires a published, unremoved window"
+        );
+        self.platform_window.begin_windows_native_destruction()
     }
 
     #[cfg(target_os = "windows")]

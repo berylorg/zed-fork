@@ -86,6 +86,10 @@ pub(super) struct ConfirmationState {
 }
 
 impl ConfirmationState {
+    pub(super) fn cleanup_unresolved(&self) -> bool {
+        self.settled.get() && !self.cleanup_settled.get()
+    }
+
     pub(super) fn cancel(&self) -> Result<()> {
         self.cancelled.set(true);
         if let Some(hwnd) = self.hwnd.get() {
@@ -204,6 +208,8 @@ impl WindowsWindowInner {
                     owner.confirmation.borrow_mut().take();
                     operation.cleanup_settled.set(true);
                     owner.finish_native_confirmation();
+                } else {
+                    owner.recoverable_confirmation_unresolved();
                 }
                 let _ = sender.send(result);
             })
