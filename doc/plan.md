@@ -16,11 +16,18 @@ close failure, and native Windows ownership/format publication through an isolat
 launching Beryl. Complete independent semantic review before publication. Do not alter unrelated
 legacy clipboard convenience consumers or introduce retries/readback acknowledgement.
 
-Blocked on 2026-10-04: native allocation size is not an exact encoded image length. Independent
+Resolved on 2026-10-04: native allocation size is not an exact encoded image length. Independent
 review rejected the writer's exact-size assumption. Beryl's
 [representation proposal](../../beryl/doc/failures/checked-clipboard-image-representation.md)
-requires Operator resolution before production changes or native qualification. Preserve source
-as unaccepted work and keep dependency publication pending. The isolated harness correction
-checks ownership before every mutation; independent review accepted the correction and all 16
-focused deterministic cases passed, including three preservation controls. Native qualification
-remains unexecuted; the image blocker prevents phase acceptance.
+was approved by the Operator and is now defined in the fork design. Implement the bounded private
+companion and qualify padded/nonaligned payloads, consistency, bounds and partial publication.
+Preserve source
+as unaccepted work and keep dependency publication pending. The independently accepted isolated
+harness correction checks ownership before every mutation. Complete native qualification before
+acceptance; canonical integration remains Beryl-owned.
+
+Current milestone: corrected source passed independent review and all 23 deterministic cases.
+Native preparation failed at `OpenClipboard` with Win32 access denied (error 5) before mutation;
+a separate session probe also denied access. Native acceptance and source publication remain
+blocked pending a Windows execution session with clipboard access. See Beryl's
+[qualification evidence](../../beryl/doc/audits/composer-marker-feedback/checked-native-clipboard.md).

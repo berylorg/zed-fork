@@ -39,6 +39,14 @@ may leave changed or partial native content but returns no success; the consumer
 that its prior clipboard value was preserved or delete content on that failure. No readback heuristic,
 automatic retry, image transcoding or extra derived representation supplies acknowledgement.
 
+Checked image writes publish the standard encoded image format together with a fixed-size private
+companion containing a version, image format, exact encoded length and content consistency digest.
+Native allocation padding is permitted and charged, never treated as additional encoded content
+when the companion is present. Both representations must be published for success. The companion
+is GPUI representation metadata, not application provenance or authentication; no decoding or
+transcoding is involved. Its native backing counts against the metadata ceiling, image native
+backing plus owned encoded bytes against the image ceiling, and all backing/output against total.
+
 A checked read holds one native clipboard snapshot while inspecting formats and exact native
 allocation lengths, validating bounded terminators/encodings, and copying one complete supported
 representation within the caller's total and individual text/metadata/image ceilings. Account native
@@ -47,6 +55,14 @@ metadata is included in the total. Image bytes are acquired encoded and never de
 Unsupported formats, malformed lengths/text, over-limit data, ownership failure and no supported
 value have distinct outcomes. No complete-value allocation may precede preflight. Snapshot ownership
 ends on every outcome, and failure returns no partial item or second copy of an acquired value.
+
+For images with the private companion, checked reads validate its version, format, encoded length
+within the actual image allocation, and digest before allocating output, then copy exactly that
+encoded prefix. Bound the companion's native allocation against metadata and total ceilings.
+Malformed, unsupported-version or mismatched companion data refuses the image without fallback.
+Foreign images without the companion are copied as the entire bounded native representation;
+this boundary does not infer their logical encoded length from allocation size. Image padding and
+companion padding remain subject to admission before publication or output allocation.
 
 Read results carry the exact native clipboard sequence for replacement detection. That sequence is
 an equality fence for the captured snapshot, not a reusable lifetime capability or authorization of
@@ -57,7 +73,9 @@ captured immutable value; consumers decide whether it remains eligible.
 Verification injects ownership, allocation, text and metadata publication, close and read failures;
 checks exact fit and one-over limits, malformed/native encoding and changed sequence; and proves
 allocation never precedes admission. Native Windows qualification exercises actual ownership and
-format publication in an isolated harness and restores the operator clipboard when safely possible.
+format publication for nonaligned image payloads and the companion as well as text/metadata;
+injected cases cover padded allocation, malformed/missing companion, consistency and publication
+failure. The isolated native harness restores the operator clipboard when safely possible.
 Independent semantic review covers unsafe native memory access, complete acknowledgement and bounds.
 
 ## Application Lifetime After The Last Window Closes
