@@ -75,7 +75,9 @@ checks exact fit and one-over limits, malformed/native encoding and changed sequ
 allocation never precedes admission. Native Windows qualification exercises actual ownership and
 format publication for nonaligned image payloads and the companion as well as text/metadata;
 injected cases cover padded allocation, malformed/missing companion, consistency and publication
-failure. The isolated native harness restores the operator clipboard when safely possible.
+failure. The isolated native harness owns a create-only private window station and desktop so it
+never acquires or mutates the Operator's clipboard. It restores the original process station and
+thread desktop and closes only test-owned handles after destroying its message-only owner window.
 Independent semantic review covers unsafe native memory access, complete acknowledgement and bounds.
 
 ## Application Lifetime After The Last Window Closes

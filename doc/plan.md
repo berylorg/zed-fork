@@ -23,13 +23,14 @@ was approved by the Operator and is now defined in the fork design. Implement th
 companion and qualify padded/nonaligned payloads, consistency, bounds and partial publication.
 Preserve source
 as unaccepted work and keep dependency publication pending. The independently accepted isolated
-harness correction checks ownership before every mutation. Complete native qualification before
+harness uses a private station clipboard. Complete native qualification before
 acceptance; canonical integration remains Beryl-owned.
 
-Current milestone: corrected source passed independent review and all 23 deterministic cases.
-Native preparation failed at `OpenClipboard` with Win32 access denied (error 5) before mutation;
-a separate session probe also denied access. Access subsequently recovered; native preparation
-now refuses the current original clipboard's `CF_BITMAP` handle before mutation. Native acceptance
-and source publication remain blocked pending Operator preparation of a safely preservable
-plain-text clipboard. See Beryl's
+Current milestone: the shared harness has been replaced with a create-only private window
+station/desktop, verifying exact original bindings and owned-handle cleanup. No further
+qualification may acquire or modify the Operator's
+actively used clipboard. The private harness passed independent review, locked metadata, focused
+Cargo check and all 20 current deterministic cases; analyzer restart succeeded. Native acceptance and
+source publication remain pending an Administrator-terminal run, since named station creation is
+denied in the unelevated agent process. See Beryl's
 [qualification evidence](../../beryl/doc/audits/composer-marker-feedback/checked-native-clipboard.md).
