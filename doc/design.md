@@ -22,6 +22,44 @@ Maintain a narrow Beryl-oriented fork of upstream Zed that carries targeted GPUI
 
 The fork exists for targeted GPUI changes needed by Beryl and should remain easy to compare with upstream Zed.
 
+## Checked Windows Clipboard Boundary
+
+GPUI exposes caller-bounded clipboard acquisition and acknowledged clipboard writing independently
+of its legacy convenience methods. Windows is the qualified backend for this boundary; unsupported
+backends return explicit unavailable rather than calling an unbounded read or assuming write success.
+The boundary owns no application marker metadata, token registry, draft identity or retry policy.
+
+A checked write accepts one text representation with optional opaque metadata, or one supported
+encoded image representation, plus explicit positive byte limits. It preflights all native encoding
+and allocation capacities with checked arithmetic before clearing/writing the clipboard. Empty,
+malformed, unsupported and over-limit requests fail before native mutation. Native ownership-open,
+allocation, format publication and required close errors remain typed. Complete success means all
+requested representations were accepted by the native clipboard, including metadata. A later error
+may leave changed or partial native content but returns no success; the consumer must never infer
+that its prior clipboard value was preserved or delete content on that failure. No readback heuristic,
+automatic retry, image transcoding or extra derived representation supplies acknowledgement.
+
+A checked read holds one native clipboard snapshot while inspecting formats and exact native
+allocation lengths, validating bounded terminators/encodings, and copying one complete supported
+representation within the caller's total and individual text/metadata/image ceilings. Account native
+UTF-16 backing and decoded UTF-8 capacity before allocating owned output, with checked arithmetic;
+metadata is included in the total. Image bytes are acquired encoded and never decoded by this API.
+Unsupported formats, malformed lengths/text, over-limit data, ownership failure and no supported
+value have distinct outcomes. No complete-value allocation may precede preflight. Snapshot ownership
+ends on every outcome, and failure returns no partial item or second copy of an acquired value.
+
+Read results carry the exact native clipboard sequence for replacement detection. That sequence is
+an equality fence for the captured snapshot, not a reusable lifetime capability or authorization of
+application metadata. Text/metadata consistency remains checked, but applications must authenticate
+their own token and complete text identity. A later clipboard replacement cannot retarget an already
+captured immutable value; consumers decide whether it remains eligible.
+
+Verification injects ownership, allocation, text and metadata publication, close and read failures;
+checks exact fit and one-over limits, malformed/native encoding and changed sequence; and proves
+allocation never precedes admission. Native Windows qualification exercises actual ownership and
+format publication in an isolated harness and restores the operator clipboard when safely possible.
+Independent semantic review covers unsafe native memory access, complete acknowledgement and bounds.
+
 ## Application Lifetime After The Last Window Closes
 
 `Application::with_quit_on_last_window_close(bool)` is a startup-only option configured before
