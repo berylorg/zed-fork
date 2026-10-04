@@ -28,6 +28,8 @@ acceptance; canonical integration remains Beryl-owned.
 
 Current milestone: corrected source passed independent review and all 23 deterministic cases.
 Native preparation failed at `OpenClipboard` with Win32 access denied (error 5) before mutation;
-a separate session probe also denied access. Native acceptance and source publication remain
-blocked pending a Windows execution session with clipboard access. See Beryl's
+a separate session probe also denied access. Access subsequently recovered; native preparation
+now refuses the current original clipboard's `CF_BITMAP` handle before mutation. Native acceptance
+and source publication remain blocked pending Operator preparation of a safely preservable
+plain-text clipboard. See Beryl's
 [qualification evidence](../../beryl/doc/audits/composer-marker-feedback/checked-native-clipboard.md).
