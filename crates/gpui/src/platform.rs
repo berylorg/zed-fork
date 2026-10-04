@@ -293,6 +293,23 @@ pub(crate) trait Platform: 'static {
     fn read_from_primary(&self) -> Option<ClipboardItem>;
     fn read_from_clipboard(&self) -> Option<ClipboardItem>;
 
+    #[allow(missing_docs)]
+    fn read_from_clipboard_checked(
+        &self,
+        _limits: crate::ClipboardLimits,
+    ) -> Result<crate::CheckedClipboardSnapshot, crate::ClipboardError> {
+        Err(crate::ClipboardError::Unavailable)
+    }
+
+    #[allow(missing_docs)]
+    fn write_to_clipboard_checked(
+        &self,
+        _item: &ClipboardItem,
+        _limits: crate::ClipboardLimits,
+    ) -> Result<(), crate::ClipboardError> {
+        Err(crate::ClipboardError::Unavailable)
+    }
+
     fn write_credentials(&self, url: &str, username: &str, password: &[u8]) -> Task<Result<()>>;
     fn read_credentials(&self, url: &str) -> Task<Result<Option<(String, Vec<u8>)>>>;
     fn delete_credentials(&self, url: &str) -> Task<Result<()>>;

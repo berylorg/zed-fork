@@ -1130,6 +1130,23 @@ impl App {
         self.platform.read_from_clipboard()
     }
 
+    #[allow(missing_docs)]
+    pub fn read_from_clipboard_checked(
+        &self,
+        limits: crate::ClipboardLimits,
+    ) -> Result<crate::CheckedClipboardSnapshot, crate::ClipboardError> {
+        self.platform.read_from_clipboard_checked(limits)
+    }
+
+    #[allow(missing_docs)]
+    pub fn write_to_clipboard_checked(
+        &self,
+        item: &ClipboardItem,
+        limits: crate::ClipboardLimits,
+    ) -> Result<(), crate::ClipboardError> {
+        self.platform.write_to_clipboard_checked(item, limits)
+    }
+
     /// Writes credentials to the platform keychain.
     pub fn write_credentials(
         &self,

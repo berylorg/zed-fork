@@ -1,3 +1,4 @@
+mod checked_clipboard;
 mod clipboard;
 mod confirmation;
 mod destination_list;

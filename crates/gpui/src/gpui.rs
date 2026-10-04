@@ -14,6 +14,11 @@ mod arena;
 mod asset_cache;
 mod assets;
 mod bounds_tree;
+#[allow(missing_docs)]
+mod checked_clipboard;
+pub use checked_clipboard::{
+    CheckedClipboardSnapshot, ClipboardError, ClipboardLimits, ClipboardRepresentation,
+};
 mod color;
 /// The default colors used by GPUI.
 pub mod colors;

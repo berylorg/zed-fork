@@ -596,6 +596,28 @@ impl Platform for WindowsPlatform {
         read_from_clipboard()
     }
 
+    fn read_from_clipboard_checked(
+        &self,
+        limits: ClipboardLimits,
+    ) -> Result<CheckedClipboardSnapshot, ClipboardError> {
+        crate::checked_clipboard::read(
+            &mut super::checked_clipboard::WindowsClipboard::new(self.handle)?,
+            limits,
+        )
+    }
+
+    fn write_to_clipboard_checked(
+        &self,
+        item: &ClipboardItem,
+        limits: ClipboardLimits,
+    ) -> Result<(), ClipboardError> {
+        crate::checked_clipboard::write(
+            &mut super::checked_clipboard::WindowsClipboard::new(self.handle)?,
+            item,
+            limits,
+        )
+    }
+
     fn write_credentials(&self, url: &str, username: &str, password: &[u8]) -> Task<Result<()>> {
         let mut password = password.to_vec();
         let mut username = username.encode_utf16().chain(Some(0)).collect_vec();
