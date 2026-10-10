@@ -22,6 +22,16 @@ Maintain a narrow Beryl-oriented fork of upstream Zed that carries targeted GPUI
 
 The fork exists for targeted GPUI changes needed by Beryl and should remain easy to compare with upstream Zed.
 
+Native test support exposes void input dispatch through the same Window event path used by the
+platform. It adds no alternate input handling, activation policy or public dispatch-result type.
+This boundary is available only for tests or the existing `test-support` feature and is qualified
+by consumers' native command-mounting tests.
+
+The void wrapper was independently reviewed and qualified on Windows by Beryl's four real Compact
+pointer-dispatch cases, nextest run `001846ed-569d-467f-b2d0-13687fa4f253`, on 2026-10-10.
+The default Beryl backend/App/Home library check also passed with test support disabled. Consumer
+acceptance details belong to [Beryl's mounting evidence](../../beryl/doc/audits/context-compaction-mount-readiness.md).
+
 ## Checked Windows Clipboard Boundary
 
 GPUI exposes caller-bounded clipboard acquisition and acknowledged clipboard writing independently

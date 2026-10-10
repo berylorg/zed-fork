@@ -5174,6 +5174,12 @@ impl Window {
                 .collect(),
         }
     }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[allow(missing_docs)]
+    pub fn dispatch_input_for_test(&mut self, event: PlatformInput, cx: &mut App) {
+        self.dispatch_event(event, cx);
+    }
 }
 
 // #[derive(Clone, Copy, Eq, PartialEq, Hash)]
