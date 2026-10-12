@@ -1,6 +1,6 @@
 use crate::{
-    App, Bounds, Hsla, Pixels, Point, ShapedLine, SharedString, TextRun, Window, WindowTextSystem,
-    WrappedLine, point, size,
+    App, Bounds, FontEnvironmentKey, Hsla, Pixels, Point, ShapedLine, SharedString, TextRun,
+    Window, WindowTextSystem, WrappedLine, point, size,
 };
 use std::{mem::size_of, ops::Range, sync::Arc};
 
@@ -44,6 +44,9 @@ pub enum StreamingLayoutError {
     Overflow(StreamingLayoutComponent),
     /// The session was cancelled.
     Cancelled,
+    FontEnvironmentChanged,
+    FontFaceCapacityExceeded,
+    ShapingFailed,
 }
 
 impl std::fmt::Display for StreamingLayoutError {
@@ -53,6 +56,16 @@ impl std::fmt::Display for StreamingLayoutError {
 }
 
 impl std::error::Error for StreamingLayoutError {}
+
+fn shaping_error(error: anyhow::Error) -> StreamingLayoutError {
+    match error.downcast_ref::<crate::FontEnvironmentError>() {
+        Some(crate::FontEnvironmentError::Changed) => StreamingLayoutError::FontEnvironmentChanged,
+        Some(crate::FontEnvironmentError::FaceCapacityExceeded) => {
+            StreamingLayoutError::FontFaceCapacityExceeded
+        }
+        None => StreamingLayoutError::ShapingFailed,
+    }
+}
 
 /// Pixel input identified by a typed invalid-metric rejection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -233,9 +246,21 @@ pub struct StreamingLayoutMap {
     pub position: Point<Pixels>,
 }
 
+/// Selects implicit line wrapping for a bounded streaming layout session.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StreamingLayoutMode {
+    /// Wraps canonical segments and inline items at the binding's finite width.
+    SoftWrap,
+    /// Retains inline placement until explicit logical-line finalization.
+    NoWrap,
+}
+
 /// Compact bounded placement state carried between independent shaping segments.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct StreamingLayoutContinuation {
+    pub font_environment: Option<FontEnvironmentKey>,
+    /// Layout mode required when resuming this continuation.
+    pub mode: StreamingLayoutMode,
     /// Immutable-input identity required by a resumed session.
     pub input_id: u64,
     /// Canonical segment-policy identity required by a resumed session.
@@ -370,13 +395,24 @@ impl WindowTextSystem {
         &self,
         binding: StreamingLayoutBinding,
     ) -> Result<StreamingLayoutSession<'_>, StreamingLayoutError> {
-        validate_binding(&binding)?;
+        self.streaming_layout_session_with_mode(binding, StreamingLayoutMode::SoftWrap)
+    }
+
+    /// Starts a bounded session with an explicit wrapping mode.
+    pub fn streaming_layout_session_with_mode(
+        &self,
+        binding: StreamingLayoutBinding,
+        mode: StreamingLayoutMode,
+    ) -> Result<StreamingLayoutSession<'_>, StreamingLayoutError> {
+        validate_binding(&binding, mode)?;
         let line_height = binding.line_height;
         let input_id = binding.input_id;
         let segment_policy_id = binding.segment_policy_id;
         let start_position = binding.start_position;
 
         let continuation = StreamingLayoutContinuation {
+            font_environment: self.font_environment_key(),
+            mode,
             input_id,
             segment_policy_id,
             next_ordinal: 0,
@@ -408,7 +444,29 @@ impl WindowTextSystem {
         binding: StreamingLayoutBinding,
         continuation: StreamingLayoutContinuation,
     ) -> Result<StreamingLayoutSession<'_>, StreamingLayoutError> {
-        validate_binding(&binding)?;
+        self.resume_streaming_layout_session_with_mode(
+            binding,
+            continuation,
+            StreamingLayoutMode::SoftWrap,
+        )
+    }
+
+    /// Resumes compact state only when its stored layout mode matches the requested mode.
+    pub fn resume_streaming_layout_session_with_mode(
+        &self,
+        binding: StreamingLayoutBinding,
+        continuation: StreamingLayoutContinuation,
+        mode: StreamingLayoutMode,
+    ) -> Result<StreamingLayoutSession<'_>, StreamingLayoutError> {
+        validate_binding(&binding, mode)?;
+        if continuation.mode != mode {
+            return Err(StreamingLayoutError::InputMismatch);
+        }
+        if continuation.font_environment.is_some()
+            && continuation.font_environment != self.font_environment_key()
+        {
+            return Err(StreamingLayoutError::FontEnvironmentChanged);
+        }
         accounting::validate_continuation(continuation, binding.line_height)?;
         if continuation.input_id != binding.input_id {
             return Err(StreamingLayoutError::InputMismatch);
@@ -441,10 +499,15 @@ fn validate_continuation_capacity(
     }
 }
 
-fn validate_binding(binding: &StreamingLayoutBinding) -> Result<(), StreamingLayoutError> {
+fn validate_binding(
+    binding: &StreamingLayoutBinding,
+    mode: StreamingLayoutMode,
+) -> Result<(), StreamingLayoutError> {
     binding.start_position.validate()?;
     let limits = binding.limits;
-    checked::validate_positive(binding.wrap_width, StreamingLayoutMetric::WrapWidth)?;
+    if mode == StreamingLayoutMode::SoftWrap {
+        checked::validate_positive(binding.wrap_width, StreamingLayoutMetric::WrapWidth)?;
+    }
     checked::validate_positive(binding.font_size, StreamingLayoutMetric::FontSize)?;
     checked::validate_positive(binding.line_height, StreamingLayoutMetric::LineHeight)?;
     if limits.segment_bytes == 0

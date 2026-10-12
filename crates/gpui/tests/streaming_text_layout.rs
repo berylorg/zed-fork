@@ -3,7 +3,7 @@ use gpui::{
     SharedString, StreamingEndOfSource, StreamingInlineObject, StreamingLayoutBinding,
     StreamingLayoutCharge, StreamingLayoutComponent, StreamingLayoutContinuation,
     StreamingLayoutError, StreamingLayoutFragment, StreamingLayoutHit, StreamingLayoutItemCharge,
-    StreamingLayoutLimits, StreamingLayoutMetric, StreamingLayoutPosition,
+    StreamingLayoutLimits, StreamingLayoutMetric, StreamingLayoutMode, StreamingLayoutPosition,
     StreamingLineFinalization, StreamingObjectGap, StreamingObjectId, StreamingObjectOrder,
     StreamingOversizeAtom, StreamingTextSegment, TestAppContext, TextRun, WindowTextSystem, font,
     point, px,
@@ -210,3 +210,7 @@ mod charge_regressions;
 #[cfg(feature = "test-support")]
 #[path = "streaming_text_layout/live_paint.rs"]
 mod live_paint;
+
+#[cfg(feature = "test-support")]
+#[path = "streaming_text_layout/no_wrap.rs"]
+mod no_wrap;

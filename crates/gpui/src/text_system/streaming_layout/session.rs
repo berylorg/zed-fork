@@ -70,20 +70,27 @@ impl StreamingLayoutSession<'_> {
         )?;
         checked::validate_style_run_boundaries(segment.text.as_ref(), &segment.runs)?;
 
-        let layout = self.text_system.layout_line_uncached(
-            segment.text.as_ref(),
-            self.binding.font_size,
-            &segment.runs,
-            None,
-        );
+        let layout = self
+            .text_system
+            .layout_line_checked(
+                segment.text.as_ref(),
+                self.binding.font_size,
+                &segment.runs,
+                None,
+            )
+            .map_err(shaping_error)?;
         validate_layout_metrics(&layout)?;
-        let mut wrap_boundaries = layout.compute_streaming_wrap_boundaries(
-            segment.text.as_ref(),
-            self.binding.wrap_width,
-            prior.inline_offset,
-            prior.line_has_content,
-            None,
-        )?;
+        let mut wrap_boundaries = if prior.mode == StreamingLayoutMode::SoftWrap {
+            layout.compute_streaming_wrap_boundaries(
+                segment.text.as_ref(),
+                self.binding.wrap_width,
+                prior.inline_offset,
+                prior.line_has_content,
+                None,
+            )?
+        } else {
+            Default::default()
+        };
         let mut placement_prior = prior;
         if wrap_boundaries.first().is_some_and(|boundary| {
             boundary.run_ix == 0 && boundary.glyph_ix == 0 && prior.line_has_content
@@ -125,7 +132,8 @@ impl StreamingLayoutSession<'_> {
             layout: Arc::new(WrappedLineLayout {
                 unwrapped_layout: layout,
                 wrap_boundaries,
-                wrap_width: Some(self.binding.wrap_width),
+                wrap_width: (prior.mode == StreamingLayoutMode::SoftWrap)
+                    .then_some(self.binding.wrap_width),
             }),
             text: segment.text.clone(),
             decoration_runs,
@@ -330,6 +338,7 @@ impl StreamingLayoutSession<'_> {
         start: StreamingLayoutPosition,
     ) -> Result<StreamingLayoutContinuation, StreamingLayoutError> {
         let prior = self.continuation.ok_or(StreamingLayoutError::Cancelled)?;
+        self.validate_font_environment(prior)?;
         if prior.ended {
             return Err(StreamingLayoutError::Ended);
         }
@@ -369,6 +378,7 @@ impl StreamingLayoutSession<'_> {
         charge: StreamingLayoutCharge,
         item_charge: StreamingLayoutItemCharge,
     ) -> Result<StreamingLayoutAdmission, StreamingLayoutError> {
+        self.validate_font_environment(continuation)?;
         validate_continuation(continuation, self.binding.line_height)?;
         self.check_total(charge)?;
         self.check_semantic_total(item_charge)?;
@@ -380,6 +390,18 @@ impl StreamingLayoutSession<'_> {
         };
         self.continuation = Some(continuation);
         Ok(admission)
+    }
+
+    fn validate_font_environment(
+        &self,
+        continuation: StreamingLayoutContinuation,
+    ) -> Result<(), StreamingLayoutError> {
+        if continuation.font_environment.is_some()
+            && continuation.font_environment != self.text_system.font_environment_key()
+        {
+            return Err(StreamingLayoutError::FontEnvironmentChanged);
+        }
+        Ok(())
     }
 
     pub(super) fn check_items(

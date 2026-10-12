@@ -4,7 +4,7 @@ use ::util::ResultExt;
 use anyhow::{Context, Result};
 use collections::HashMap;
 use itertools::Itertools;
-use parking_lot::{RwLock, RwLockUpgradableReadGuard};
+use parking_lot::RwLock;
 use windows::{
     Win32::{
         Foundation::*,
@@ -13,7 +13,7 @@ use windows::{
             Direct3D::D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP, Direct3D11::*, DirectWrite::*,
             Dxgi::Common::*, Gdi::LOGFONTW,
         },
-        System::SystemServices::LOCALE_NAME_MAX_LENGTH,
+        System::{SystemServices::LOCALE_NAME_MAX_LENGTH, Threading::WaitForSingleObject},
         UI::WindowsAndMessaging::*,
     },
     core::*,
@@ -56,11 +56,25 @@ struct DirectWriteState {
     components: DirectWriteComponent,
     system_ui_font_name: SharedString,
     system_font_collection: IDWriteFontCollection1,
+    system_font_fallback: IDWriteFontFallback,
     custom_font_collection: IDWriteFontCollection1,
     fonts: Vec<FontInfo>,
     font_selections: HashMap<Font, FontId>,
-    font_id_by_identifier: HashMap<FontIdentifier, FontId>,
+    font_id_by_identifier: HashMap<FontIdentifier, Vec<FontId>>,
+    font_environment_generation: Option<u64>,
+    expiration_collection: Option<IDWriteFontCollection3>,
+    face_capacity_refused: bool,
+    #[cfg(feature = "test-support")]
+    refresh_attempts: usize,
 }
+
+const MAX_RETAINED_FONT_FACES: usize = 16_384;
+
+#[cfg(feature = "test-support")]
+#[path = "direct_write/font_environment_test_support.rs"]
+mod font_environment_test_support;
+#[cfg(feature = "test-support")]
+pub use font_environment_test_support::WindowsFontEnvironmentTestContext;
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct FontIdentifier {
@@ -185,13 +199,8 @@ impl GPUState {
 impl DirectWriteTextSystem {
     pub(crate) fn new(directx_devices: &DirectXDevices) -> Result<Self> {
         let components = DirectWriteComponent::new(directx_devices)?;
-        let system_font_collection = unsafe {
-            let mut result = std::mem::zeroed();
-            components
-                .factory
-                .GetSystemFontCollection(false, &mut result, true)?;
-            result.unwrap()
-        };
+        let (system_font_collection, expiration_collection) =
+            acquire_system_font_collection(&components.factory)?;
         let custom_font_set = unsafe { components.builder.CreateFontSet()? };
         let custom_font_collection = unsafe {
             components
@@ -199,15 +208,23 @@ impl DirectWriteTextSystem {
                 .CreateFontCollectionFromFontSet(&custom_font_set)?
         };
         let system_ui_font_name = get_system_ui_font_name();
+        let system_font_fallback = unsafe { components.factory.GetSystemFontFallback()? };
+        let font_environment_generation = expiration_collection.as_ref().map(|_| 0);
 
         Ok(Self(RwLock::new(DirectWriteState {
             components,
             system_ui_font_name,
             system_font_collection,
+            system_font_fallback,
             custom_font_collection,
             fonts: Vec::new(),
             font_selections: HashMap::default(),
             font_id_by_identifier: HashMap::default(),
+            font_environment_generation,
+            expiration_collection,
+            face_capacity_refused: false,
+            #[cfg(feature = "test-support")]
+            refresh_attempts: 0,
         })))
     }
 
@@ -217,6 +234,29 @@ impl DirectWriteTextSystem {
 }
 
 impl PlatformTextSystem for DirectWriteTextSystem {
+    #[cfg(feature = "test-support")]
+    fn adopt_font_environment_for_test(&self) -> Result<()> {
+        let mut state = self.0.write();
+        state.observe_font_environment();
+        let before = state
+            .font_environment_generation
+            .context("font environment unqualified")?;
+        let collection = state.system_font_collection.clone();
+        let fallback = state.system_font_fallback.clone();
+        state.adopt_observed_font_environment(WAIT_OBJECT_0, || Some((collection, fallback)));
+        anyhow::ensure!(
+            state
+                .font_environment_generation
+                .is_some_and(|after| after != before),
+            "font environment adoption unqualified"
+        );
+        Ok(())
+    }
+    fn font_environment_generation(&self) -> Option<u64> {
+        let mut state = self.0.write();
+        state.observe_font_environment();
+        state.font_environment_generation
+    }
     fn add_fonts(&self, fonts: Vec<Cow<'static, [u8]>>) -> Result<()> {
         self.0.write().add_fonts(fonts)
     }
@@ -226,12 +266,12 @@ impl PlatformTextSystem for DirectWriteTextSystem {
     }
 
     fn font_id(&self, font: &Font) -> Result<FontId> {
-        let lock = self.0.upgradable_read();
+        let mut lock = self.0.write();
+        lock.observe_font_environment();
         if let Some(font_id) = lock.font_selections.get(font) {
             Ok(*font_id)
         } else {
-            let mut lock = RwLockUpgradableReadGuard::upgrade(lock);
-            let font_id = lock.select_font(font);
+            let font_id = lock.select_font(font)?;
             lock.font_selections.insert(font.clone(), font_id);
             Ok(font_id)
         }
@@ -269,19 +309,125 @@ impl PlatformTextSystem for DirectWriteTextSystem {
     }
 
     fn layout_line(&self, text: &str, font_size: Pixels, runs: &[FontRun]) -> LineLayout {
-        self.0
-            .write()
-            .layout_line(text, font_size, runs)
+        self.layout_line_checked(text, font_size, runs)
             .log_err()
             .unwrap_or(LineLayout {
                 font_size,
                 ..Default::default()
             })
     }
+
+    fn layout_line_checked(
+        &self,
+        text: &str,
+        font_size: Pixels,
+        runs: &[FontRun],
+    ) -> Result<LineLayout> {
+        self.0.write().layout_line(text, font_size, runs)
+    }
 }
 
 impl DirectWriteState {
+    fn advance_font_environment(&mut self) {
+        self.font_environment_generation = self
+            .font_environment_generation
+            .and_then(|g| g.checked_add(1));
+        self.font_selections.clear();
+        self.font_id_by_identifier.clear();
+    }
+
+    fn observe_font_environment(&mut self) {
+        if self.font_environment_generation.is_none() {
+            return;
+        }
+        let event = self
+            .expiration_collection
+            .as_ref()
+            .map(|collection| unsafe { collection.GetExpirationEvent() });
+        let Some(event) = event.filter(|event| !event.is_invalid()) else {
+            self.fail_font_environment();
+            return;
+        };
+        let factory = self.components.factory.clone();
+        self.adopt_observed_font_environment(unsafe { WaitForSingleObject(event, 0) }, || unsafe {
+            let observable = factory.cast::<IDWriteFactory7>().ok()?;
+            let collection = observable
+                .GetSystemFontCollection(false, DWRITE_FONT_FAMILY_MODEL_WEIGHT_STRETCH_STYLE)
+                .ok()?;
+            Some((
+                collection.cast().ok()?,
+                factory.GetSystemFontFallback().ok()?,
+            ))
+        });
+    }
+
+    fn adopt_observed_font_environment(
+        &mut self,
+        wait_result: WAIT_EVENT,
+        replacement: impl FnOnce() -> Option<(IDWriteFontCollection1, IDWriteFontFallback)>,
+    ) {
+        self.adopt_observed_font_environment_with_observer(
+            wait_result,
+            replacement,
+            observable_collection,
+        );
+    }
+
+    fn adopt_observed_font_environment_with_observer(
+        &mut self,
+        wait_result: WAIT_EVENT,
+        replacement: impl FnOnce() -> Option<(IDWriteFontCollection1, IDWriteFontFallback)>,
+        observe: impl FnOnce(&IDWriteFontCollection1) -> Option<IDWriteFontCollection3>,
+    ) {
+        match wait_result {
+            WAIT_TIMEOUT => return,
+            WAIT_OBJECT_0 => {}
+            _ => {
+                self.fail_font_environment();
+                return;
+            }
+        }
+        #[cfg(feature = "test-support")]
+        {
+            self.refresh_attempts += 1;
+        }
+        let Some((collection, fallback)) = replacement() else {
+            self.fail_font_environment();
+            return;
+        };
+        let Some(observation) = observe(&collection) else {
+            self.fail_font_environment();
+            return;
+        };
+        self.system_font_collection = collection;
+        self.system_font_fallback = fallback;
+        self.expiration_collection = Some(observation);
+        self.advance_font_environment();
+    }
+
+    fn fail_font_environment(&mut self) {
+        self.font_environment_generation = None;
+        self.font_selections.clear();
+        self.font_id_by_identifier.clear();
+    }
+
+    fn admit_font_face(&mut self, identifier: FontIdentifier, info: FontInfo) -> Result<FontId> {
+        if self.fonts.len() >= MAX_RETAINED_FONT_FACES {
+            self.face_capacity_refused = true;
+            return Err(FontEnvironmentError::FaceCapacityExceeded.into());
+        }
+        let id = FontId(self.fonts.len());
+        self.fonts.push(info);
+        self.font_id_by_identifier
+            .entry(identifier)
+            .or_default()
+            .push(id);
+        Ok(id)
+    }
     fn add_fonts(&mut self, fonts: Vec<Cow<'static, [u8]>>) -> Result<()> {
+        if fonts.is_empty() {
+            return Ok(());
+        }
         for font_data in fonts {
             match font_data {
                 Cow::Borrowed(data) => unsafe {
@@ -317,6 +463,7 @@ impl DirectWriteState {
                 .CreateFontCollectionFromFontSet(&set)?
         };
         self.custom_font_collection = collection;
+        self.advance_font_environment();
 
         Ok(())
     }
@@ -364,14 +511,13 @@ impl DirectWriteState {
                 builder.AddMapping(
                     &unicode_ranges,
                     &[target_family_name.as_ptr()],
-                    None,
+                    &self.system_font_collection,
                     None,
                     None,
                     1.0,
                 )?;
             }
-            let system_fallbacks = self.components.factory.GetSystemFontFallback()?;
-            builder.AddMappings(&system_fallbacks)?;
+            builder.AddMappings(&self.system_font_fallback)?;
             Ok(Some(builder.CreateFontFallback()?))
         }
     }
@@ -436,28 +582,15 @@ impl DirectWriteState {
                 fallbacks,
                 is_system_font,
             };
-            let font_id = FontId(self.fonts.len());
-            self.fonts.push(font_info);
-            self.font_id_by_identifier.insert(identifier, font_id);
-            return Some(font_id);
+            return self.admit_font_face(identifier, font_info).log_err();
         }
         None
     }
 
-    unsafe fn update_system_font_collection(&mut self) {
-        let mut collection = unsafe { std::mem::zeroed() };
-        if unsafe {
-            self.components
-                .factory
-                .GetSystemFontCollection(false, &mut collection, true)
-                .log_err()
-                .is_some()
-        } {
-            self.system_font_collection = collection.unwrap();
+    fn select_font(&mut self, target_font: &Font) -> Result<FontId> {
+        if self.fonts.len() >= MAX_RETAINED_FONT_FACES {
+            return Err(FontEnvironmentError::FaceCapacityExceeded.into());
         }
-    }
-
-    fn select_font(&mut self, target_font: &Font) -> FontId {
         unsafe {
             if target_font.family == ".SystemUIFont" {
                 let family = self.system_ui_font_name.clone();
@@ -468,7 +601,7 @@ impl DirectWriteState {
                     &target_font.features,
                     target_font.fallbacks.as_ref(),
                 )
-                .unwrap()
+                .context("system UI font unavailable or native face limit exceeded")
             } else {
                 let family = self.system_ui_font_name.clone();
                 self.find_font_id(
@@ -478,24 +611,11 @@ impl DirectWriteState {
                     &target_font.features,
                     target_font.fallbacks.as_ref(),
                 )
-                .unwrap_or_else(|| {
-                    #[cfg(any(test, feature = "test-support"))]
-                    {
-                        panic!("ERROR: {} font not found!", target_font.family);
-                    }
-                    #[cfg(not(any(test, feature = "test-support")))]
-                    {
-                        log::error!("{} not found, use {} instead.", target_font.family, family);
-                        self.get_font_id_from_font_collection(
-                            family.as_ref(),
-                            target_font.weight,
-                            target_font.style,
-                            &target_font.features,
-                            target_font.fallbacks.as_ref(),
-                            true,
-                        )
-                        .unwrap()
-                    }
+                .with_context(|| {
+                    format!(
+                        "font '{}' unavailable or native face limit exceeded",
+                        target_font.family
+                    )
                 })
             }
         }
@@ -529,17 +649,6 @@ impl DirectWriteState {
                     true,
                 )
             })
-            .or_else(|| {
-                self.update_system_font_collection();
-                self.get_font_id_from_font_collection(
-                    family_name,
-                    weight,
-                    style,
-                    features,
-                    fallbacks,
-                    true,
-                )
-            })
         }
     }
 
@@ -549,6 +658,7 @@ impl DirectWriteState {
         font_size: Pixels,
         font_runs: &[FontRun],
     ) -> Result<LineLayout> {
+        self.face_capacity_refused = false;
         if font_runs.is_empty() {
             return Ok(LineLayout {
                 font_size,
@@ -584,6 +694,8 @@ impl DirectWriteState {
                     .cast()?;
                 if let Some(ref fallbacks) = font_info.fallbacks {
                     format.SetFontFallback(fallbacks)?;
+                } else {
+                    format.SetFontFallback(&self.system_font_fallback)?;
                 }
 
                 let layout = self.components.factory.CreateTextLayout(
@@ -649,12 +761,16 @@ impl DirectWriteState {
                 runs: &mut runs,
                 width: 0.0,
             };
-            text_layout.Draw(
+            let drawn = text_layout.Draw(
                 Some(&renderer_context as *const _ as _),
                 &text_renderer.0,
                 0.0,
                 0.0,
-            )?;
+            );
+            if renderer_context.text_system.face_capacity_refused {
+                return Err(FontEnvironmentError::FaceCapacityExceeded.into());
+            }
+            drawn?;
             let width = px(renderer_context.width);
 
             Ok(LineLayout {
@@ -1473,14 +1589,35 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
             return Ok(());
         };
 
-        let font_id = if let Some(id) = context
+        let existing = context
             .text_system
             .font_id_by_identifier
             .get(&font_identifier)
-        {
-            *id
+            .and_then(|ids| {
+                ids.iter().copied().find(|id| {
+                    same_native_font_face(&context.text_system.fonts[id.0].font_face, font_face)
+                })
+            });
+        let font_id = if let Some(id) = existing {
+            id
         } else {
-            context.text_system.select_font(&font_struct)
+            let features = unsafe {
+                context
+                    .text_system
+                    .generate_font_features(&font_struct.features)
+            }
+            .map_err(|_| windows::core::Error::from_hresult(E_FAIL))?;
+            let info = FontInfo {
+                font_family: font_struct.family.to_string(),
+                font_face: font_face.clone(),
+                features,
+                fallbacks: None,
+                is_system_font: true,
+            };
+            context
+                .text_system
+                .admit_font_face(font_identifier, info)
+                .map_err(|_| windows::core::Error::from_hresult(E_FAIL))?
         };
 
         let glyph_ids = unsafe { std::slice::from_raw_parts(glyphrun.glyphIndices, glyph_count) };
@@ -1879,6 +2016,57 @@ fn is_color_glyph(
 }
 
 const DEFAULT_LOCALE_NAME: PCWSTR = windows::core::w!("en-US");
+
+fn observable_collection(collection: &IDWriteFontCollection1) -> Option<IDWriteFontCollection3> {
+    let observation = collection.cast::<IDWriteFontCollection3>().ok()?;
+    observable_collection_with_wait(observation, |event| unsafe {
+        WaitForSingleObject(event, 0)
+    })
+}
+
+fn observable_collection_with_wait(
+    observation: IDWriteFontCollection3,
+    wait: impl FnOnce(HANDLE) -> WAIT_EVENT,
+) -> Option<IDWriteFontCollection3> {
+    let event = unsafe { observation.GetExpirationEvent() };
+    if event.is_invalid() || wait(event) != WAIT_TIMEOUT {
+        return None;
+    }
+    Some(observation)
+}
+
+fn acquire_system_font_collection(
+    factory: &IDWriteFactory5,
+) -> Result<(IDWriteFontCollection1, Option<IDWriteFontCollection3>)> {
+    if let Ok(observable) = factory.cast::<IDWriteFactory7>() {
+        if let Ok(collection) = unsafe {
+            observable.GetSystemFontCollection(false, DWRITE_FONT_FAMILY_MODEL_WEIGHT_STRETCH_STYLE)
+        } {
+            let collection: IDWriteFontCollection1 = collection.cast()?;
+            let observation = observable_collection(&collection);
+            return Ok((collection, observation));
+        }
+    }
+    let mut collection = None;
+    unsafe { factory.GetSystemFontCollection(false, &mut collection, true)? };
+    Ok((
+        collection.context("system font collection unavailable")?,
+        None,
+    ))
+}
+
+fn same_native_font_face(left: &IDWriteFontFace3, right: &IDWriteFontFace3) -> bool {
+    if let Ok(face) = left.cast::<IDWriteFontFace5>() {
+        return unsafe { face.Equals(right).as_bool() };
+    }
+    if right.cast::<IDWriteFontFace5>().is_ok() {
+        return false;
+    }
+    match unsafe { (left.GetFontFaceReference(), right.GetFontFaceReference()) } {
+        (Ok(left), Ok(right)) => unsafe { left.Equals(&right).as_bool() },
+        _ => false,
+    }
+}
 
 #[cfg(test)]
 mod tests {

@@ -51,7 +51,10 @@ impl StreamingLayoutSession<'_> {
         let mut line_block_extent = prior.line_block_extent;
         let proposed_inline =
             checked::checked_pixel_add(inline, width, StreamingLayoutComponent::Continuation)?;
-        if prior.line_has_content && proposed_inline > self.binding.wrap_width {
+        if prior.mode == StreamingLayoutMode::SoftWrap
+            && prior.line_has_content
+            && proposed_inline > self.binding.wrap_width
+        {
             inline = Pixels::ZERO;
             block = checked::checked_pixel_add(
                 block,
@@ -69,12 +72,15 @@ impl StreamingLayoutSession<'_> {
             checked::checked_pixel_add(inline, width, StreamingLayoutComponent::Continuation)?;
         line_block_extent = line_block_extent.max(height);
         let line = Arc::new(ShapedLine {
-            layout: self.text_system.layout_line_uncached(
-                presentation.as_ref(),
-                self.binding.font_size,
-                runs,
-                Some(width),
-            ),
+            layout: self
+                .text_system
+                .layout_line_checked(
+                    presentation.as_ref(),
+                    self.binding.font_size,
+                    runs,
+                    Some(width),
+                )
+                .map_err(shaping_error)?,
             text: presentation.clone(),
             decoration_runs: decorations,
         });

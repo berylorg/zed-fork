@@ -24,6 +24,9 @@ mod test;
 mod windows;
 
 #[cfg(all(target_os = "windows", feature = "test-support"))]
+pub use windows::WindowsFontEnvironmentTestContext;
+
+#[cfg(all(target_os = "windows", feature = "test-support"))]
 pub use windows::WindowsNativeConfirmationTestFault;
 #[cfg(all(target_os = "windows", feature = "test-support"))]
 pub use windows::with_windows_window_creation_hook_for_test;
@@ -251,6 +254,15 @@ pub(crate) trait Platform: 'static {
         directory: &Path,
         suggested_name: Option<&str>,
     ) -> oneshot::Receiver<Result<Option<PathBuf>>>;
+    fn prompt_for_save_path(
+        &self,
+        _directory: &Path,
+        _suggested_name: Option<&str>,
+    ) -> oneshot::Receiver<Result<Option<SavePathChoice>>> {
+        let (sender, receiver) = oneshot::channel();
+        let _ = sender.send(Err(anyhow::anyhow!("native save choice is unavailable")));
+        receiver
+    }
     fn can_select_mixed_files_and_dirs(&self) -> bool;
     fn reveal_path(&self, path: &Path);
     fn open_with_system(&self, path: &Path);
@@ -1163,6 +1175,14 @@ pub trait PlatformDispatcher: Send + Sync {
 }
 
 pub(crate) trait PlatformTextSystem: Send + Sync {
+    fn font_environment_generation(&self) -> Option<u64> {
+        None
+    }
+
+    #[cfg(feature = "test-support")]
+    fn adopt_font_environment_for_test(&self) -> Result<()> {
+        anyhow::bail!("native font environment adoption test seam unavailable")
+    }
     fn add_fonts(&self, fonts: Vec<Cow<'static, [u8]>>) -> Result<()>;
     fn all_font_names(&self) -> Vec<String>;
     fn font_id(&self, descriptor: &Font) -> Result<FontId>;
@@ -1177,6 +1197,14 @@ pub(crate) trait PlatformTextSystem: Send + Sync {
         raster_bounds: Bounds<DevicePixels>,
     ) -> Result<(Size<DevicePixels>, Vec<u8>)>;
     fn layout_line(&self, text: &str, font_size: Pixels, runs: &[FontRun]) -> LineLayout;
+    fn layout_line_checked(
+        &self,
+        text: &str,
+        font_size: Pixels,
+        runs: &[FontRun],
+    ) -> Result<LineLayout> {
+        Ok(self.layout_line(text, font_size, runs))
+    }
 }
 
 pub(crate) struct NoopTextSystem;
@@ -1189,6 +1217,9 @@ impl NoopTextSystem {
 }
 
 impl PlatformTextSystem for NoopTextSystem {
+    fn font_environment_generation(&self) -> Option<u64> {
+        Some(0)
+    }
     fn add_fonts(&self, _fonts: Vec<Cow<'static, [u8]>>) -> Result<()> {
         Ok(())
     }
@@ -1966,6 +1997,12 @@ pub enum WindowBackgroundAppearance {
     ///
     /// Not always supported.
     Blurred,
+}
+
+#[derive(Clone, Debug)]
+pub struct SavePathChoice {
+    pub path: PathBuf,
+    pub replace_existing: bool,
 }
 
 /// The options that can be configured for a file dialog prompt

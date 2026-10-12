@@ -29,6 +29,8 @@ pub use confirmation::{
     WindowsNativeConfirmationOutcome, WindowsNativeConfirmationRequest,
 };
 pub(crate) use destination_list::*;
+#[cfg(feature = "test-support")]
+pub use direct_write::WindowsFontEnvironmentTestContext;
 pub(crate) use direct_write::*;
 pub(crate) use directx_atlas::*;
 pub(crate) use directx_devices::*;

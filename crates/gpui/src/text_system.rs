@@ -1,3 +1,4 @@
+mod font_environment;
 mod font_fallbacks;
 mod font_features;
 mod line;
@@ -5,6 +6,8 @@ mod line_layout;
 mod line_wrapper;
 mod streaming_layout;
 
+use font_environment::FontResolutionCache;
+pub use font_environment::*;
 pub use font_fallbacks::*;
 pub use font_features::*;
 pub use line::*;
@@ -22,7 +25,6 @@ use anyhow::{Context as _, anyhow};
 use collections::FxHashMap;
 use core::fmt;
 use derive_more::{Add, Deref, FromStr, Sub};
-use itertools::Itertools;
 use parking_lot::{Mutex, RwLock, RwLockUpgradableReadGuard};
 use smallvec::{SmallVec, smallvec};
 use std::{
@@ -55,7 +57,8 @@ pub(crate) const SUBPIXEL_VARIANTS_Y: u8 =
 /// The GPUI text rendering sub system.
 pub struct TextSystem {
     platform_text_system: Arc<dyn PlatformTextSystem>,
-    font_ids_by_font: RwLock<FxHashMap<Font, Result<FontId>>>,
+    font_ids_by_font: Mutex<FontResolutionCache>,
+    font_environment_owner: Option<u64>,
     font_metrics: RwLock<FxHashMap<FontId, FontMetrics>>,
     raster_bounds: RwLock<FxHashMap<RenderGlyphParams, Bounds<DevicePixels>>>,
     wrapper_pool: Mutex<FxHashMap<FontIdWithSize, Vec<LineWrapper>>>,
@@ -69,7 +72,8 @@ impl TextSystem {
             platform_text_system,
             font_metrics: RwLock::default(),
             raster_bounds: RwLock::default(),
-            font_ids_by_font: RwLock::default(),
+            font_ids_by_font: Mutex::default(),
+            font_environment_owner: font_environment::allocate_owner(),
             wrapper_pool: Mutex::default(),
             font_runs_pool: Mutex::default(),
             fallback_font_stack: smallvec![
@@ -104,7 +108,21 @@ impl TextSystem {
 
     /// Add a font's data to the text system.
     pub fn add_fonts(&self, fonts: Vec<Cow<'static, [u8]>>) -> Result<()> {
-        self.platform_text_system.add_fonts(fonts)
+        let mut cache = self.font_ids_by_font.lock();
+        let result = self.platform_text_system.add_fonts(fonts);
+        cache.fonts.clear();
+        result
+    }
+
+    pub fn font_environment_key(&self) -> Option<FontEnvironmentKey> {
+        let owner = self.font_environment_owner?;
+        let generation = self.platform_text_system.font_environment_generation()?;
+        Some(FontEnvironmentKey::new(owner, generation))
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn adopt_font_environment_for_test(&self) -> Result<()> {
+        self.platform_text_system.adopt_font_environment_for_test()
     }
 
     /// Get the FontId for the configure font family and style.
@@ -112,30 +130,42 @@ impl TextSystem {
         fn clone_font_id_result(font_id: &Result<FontId>) -> Result<FontId> {
             match font_id {
                 Ok(font_id) => Ok(*font_id),
-                Err(err) => Err(anyhow!("{err}")),
+                Err(err) => match err.downcast_ref::<FontEnvironmentError>() {
+                    Some(error) => Err((*error).into()),
+                    None => Err(anyhow!("{err}")),
+                },
             }
         }
 
-        let font_id = self
-            .font_ids_by_font
-            .read()
-            .get(font)
-            .map(clone_font_id_result);
-        if let Some(font_id) = font_id {
-            font_id
-        } else {
-            let font_id = self.platform_text_system.font_id(font);
-            self.font_ids_by_font
-                .write()
-                .insert(font.clone(), clone_font_id_result(&font_id));
-            font_id
+        let mut cache = self.font_ids_by_font.lock();
+        let generation = self.platform_text_system.font_environment_generation();
+        if generation != cache.generation || generation.is_none() {
+            cache.fonts.clear();
+            cache.generation = generation;
         }
+        if let Some(font_id) = cache.fonts.get(font) {
+            return clone_font_id_result(font_id);
+        }
+        let font_id = self.platform_text_system.font_id(font);
+        let after = self.platform_text_system.font_environment_generation();
+        if generation != after {
+            cache.fonts.clear();
+            cache.generation = after;
+            return Err(FontEnvironmentError::Changed.into());
+        }
+        if generation.is_some() {
+            cache
+                .fonts
+                .insert(font.clone(), clone_font_id_result(&font_id));
+        }
+        font_id
     }
 
     /// Get the Font for the Font Id.
     pub fn get_font_for_id(&self, id: FontId) -> Option<Font> {
-        let lock = self.font_ids_by_font.read();
-        lock.iter()
+        let lock = self.font_ids_by_font.lock();
+        lock.fonts
+            .iter()
             .filter_map(|(font, result)| match result {
                 Ok(font_id) if *font_id == id => Some(font.clone()),
                 _ => None,
@@ -150,23 +180,31 @@ impl TextSystem {
     ///
     /// Panics if the font and none of the fallbacks can be resolved.
     pub fn resolve_font(&self, font: &Font) -> FontId {
-        if let Ok(font_id) = self.font_id(font) {
-            return font_id;
-        }
+        self.try_resolve_font(font)
+            .unwrap_or_else(|error| panic!("failed to resolve font '{}': {error}", font.family))
+    }
+
+    pub fn try_resolve_font(&self, font: &Font) -> Result<FontId> {
+        let mut last_error = match self.font_id(font) {
+            Ok(id) => return Ok(id),
+            Err(error) if error.downcast_ref::<FontEnvironmentError>().is_some() => {
+                return Err(error);
+            }
+            Err(error) => error,
+        };
         for fallback in &self.fallback_font_stack {
-            if let Ok(font_id) = self.font_id(fallback) {
-                return font_id;
+            match self.font_id(fallback) {
+                Ok(id) => return Ok(id),
+                Err(error) if error.downcast_ref::<FontEnvironmentError>().is_some() => {
+                    return Err(error);
+                }
+                Err(error) => last_error = error,
             }
         }
-
-        panic!(
-            "failed to resolve font '{}' or any of the fallbacks: {}",
-            font.family,
-            self.fallback_font_stack
-                .iter()
-                .map(|fallback| &fallback.family)
-                .join(", ")
-        );
+        Err(last_error.context(format!(
+            "font '{}' and its fallbacks unavailable",
+            font.family
+        )))
     }
 
     /// Get the bounding box for the given font and font size.
@@ -369,6 +407,38 @@ pub struct WindowTextSystem {
 }
 
 impl WindowTextSystem {
+    pub fn layout_line_checked(
+        &self,
+        text: &str,
+        font_size: Pixels,
+        runs: &[TextRun],
+        force_width: Option<Pixels>,
+    ) -> Result<Arc<LineLayout>> {
+        let before = self.font_environment_key();
+        let mut font_runs = Vec::<FontRun>::with_capacity(runs.len());
+        for run in runs {
+            let font_id = self.try_resolve_font(&run.font)?;
+            if let Some(last) = font_runs.last_mut().filter(|last| last.font_id == font_id) {
+                last.len += run.len;
+            } else {
+                font_runs.push(FontRun {
+                    len: run.len,
+                    font_id,
+                });
+            }
+        }
+        let mut layout = self
+            .platform_text_system
+            .layout_line_checked(text, font_size, &font_runs)?;
+        line_layout::apply_force_width(&mut layout, force_width);
+        if before.is_some() && before != self.font_environment_key() {
+            return Err(FontEnvironmentError::Changed.into());
+        }
+        Ok(Arc::new(layout))
+    }
+    pub fn font_environment_key(&self) -> Option<FontEnvironmentKey> {
+        self.text_system.font_environment_key()
+    }
     pub(crate) fn new(text_system: Arc<TextSystem>) -> Self {
         Self {
             line_layout_cache: LineLayoutCache::new(text_system.platform_text_system.clone()),
@@ -571,17 +641,7 @@ impl WindowTextSystem {
         runs: &[TextRun],
         force_width: Option<Pixels>,
     ) -> Arc<LineLayout> {
-        self.layout_line_with_cache(text, font_size, runs, force_width, true)
-    }
-
-    pub(crate) fn layout_line_uncached(
-        &self,
-        text: &str,
-        font_size: Pixels,
-        runs: &[TextRun],
-        force_width: Option<Pixels>,
-    ) -> Arc<LineLayout> {
-        self.layout_line_with_cache(text, font_size, runs, force_width, false)
+        self.layout_line_with_cache(text, font_size, runs, force_width)
     }
 
     #[cfg(feature = "test-support")]
@@ -596,7 +656,6 @@ impl WindowTextSystem {
         font_size: Pixels,
         runs: &[TextRun],
         force_width: Option<Pixels>,
-        use_cache: bool,
     ) -> Arc<LineLayout> {
         let mut last_run = None::<&TextRun>;
         let mut last_font: Option<FontId> = None;
@@ -632,17 +691,12 @@ impl WindowTextSystem {
             }
         }
 
-        let layout = if use_cache {
-            self.line_layout_cache.layout_line(
-                &SharedString::new(text),
-                font_size,
-                &font_runs,
-                force_width,
-            )
-        } else {
-            self.line_layout_cache
-                .layout_line_uncached(text, font_size, &font_runs, force_width)
-        };
+        let layout = self.line_layout_cache.layout_line(
+            &SharedString::new(text),
+            font_size,
+            &font_runs,
+            force_width,
+        );
 
         self.font_runs_pool.lock().push(font_runs);
 

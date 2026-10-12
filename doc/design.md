@@ -32,6 +32,30 @@ pointer-dispatch cases, nextest run `001846ed-569d-467f-b2d0-13687fa4f253`, on 2
 The default Beryl backend/App/Home library check also passed with test support disabled. Consumer
 acceptance details belong to [Beryl's mounting evidence](../../beryl/doc/audits/context-compaction-mount-readiness.md).
 
+## Windows Native Save Destination Choice
+
+A narrow Windows save-choice capability returns one accepted destination and whether replacement
+was authorized by native overwrite confirmation for that same choice. Its overwrite callback owns
+one native TaskDialog confirmation, parented to the live native save dialog, with native Yes/No
+buttons, dismissal/cancellation and No as the default. Only explicit Yes records confirmed path
+authority and accepts that overwrite; No, Escape or dismissal refuses it and retains no authority.
+The generic picker API and its ordinary native behavior remain unchanged.
+
+Clear prior confirmation state before each overwrite attempt and on selection/folder/type change
+or share refusal. Match the confirmed path with the final accepted result. Native callbacks hold
+no state lock across COM calls or modal confirmation. Cancellation returns no choice; native
+`ERROR_CANCELLED` alone is cancellation, while creation, setup, confirmation, `Show`, callback and
+result-extraction failures are errors. A declined overwrite, including a later same-name new-file
+choice after external deletion, cannot carry earlier replacement authority. Unsupported native
+backends report unavailable through this capability without changing their generic picker APIs.
+
+This boundary chooses a destination and supplies no file writer or publication policy. Consumers
+own exact output and cancellation/effect lifecycle, use non-replacing publication for a choice
+without overwrite authority, and may replace the accepted path only with that authority. The
+choice grants path-level replacement intent, not a file-identity or filesystem-lock guarantee.
+Verification qualifies new choices, confirmed replacement, declined replacement followed by both
+a different new choice and an externally deleted same-name new choice, cancellation, failures and
+cleanup of the bounded native event subscription.
 ## Checked Windows Clipboard Boundary
 
 GPUI exposes caller-bounded clipboard acquisition and acknowledged clipboard writing independently
@@ -316,7 +340,21 @@ may perform bounded shaping and allocation for the admitted presentation, but pe
 whole-stream scan or object-registry work. The continuation remains fixed-size, and exact retained
 byte and semantic-item accounting includes every retained addition required by object support.
 
-One streaming session is bound to immutable shaping inputs: wrapping width, font and size, text
+Streaming sessions explicitly select `StreamingLayoutMode::SoftWrap` or `NoWrap` through
+`WindowTextSystem::streaming_layout_session_with_mode` and
+`resume_streaming_layout_session_with_mode`. Existing session entry points select soft-wrap.
+In no-wrap mode, text segments,
+source-covering oversize atoms and source-zero-width objects continue on the current logical line
+regardless of the binding's wrap width. Only explicit logical-line finalization or end-of-source
+finalizes that line. Text fragment wrap facts are empty and cumulative inline placement remains
+finite and checked; oversized or overflowing geometry follows the ordinary atomic failure contract.
+Mode is a compact continuation fact and a resumed session must select the same mode. A soft-wrap
+entry point cannot resume no-wrap state, even when the caller reuses the other binding identities.
+The width field is used and validated only for soft-wrap mode. Neither mode interprets tabs or
+chooses source grapheme segmentation on behalf of the consumer; consumers supply canonical segments
+and a consistent bounded tab presentation policy.
+
+One streaming session is bound to immutable shaping inputs: layout mode, wrapping width, font and size, text
 runs, line metrics, segment policy, object geometry, and other glyph- or placement-affecting values.
 Its compact resumable continuation contains the next ordinal and exact composite position, current
 inline and block placement, current line block extent and visual-line count, logical-content
@@ -353,6 +391,52 @@ fragments releases their retained presentation, shaping, map, object, and gap re
 text backends may receive complete strings internally only because each string is one already
 admitted bounded canonical segment. The public boundary remains app-neutral and owns only its
 layout identities and lifecycles.
+
+## Observed Font Environment Generation
+
+The shared GPUI text system exposes an optional fixed-size font-environment key through both its
+shared and window text-system boundaries. The opaque equality-comparable key identifies the exact
+text-system owner and its generation; it cannot compare equal across distinct owners. A qualified
+generation identifies the effective
+platform font collections and fallback inputs used for font resolution and shaping. Its value is
+stable while those inputs remain unchanged, changes on an observed collection adoption or custom
+font addition, and never wraps or reuses an earlier value. Unsupported observation, exhausted
+generation identity or a failed environment transition yields unavailable qualification; consumers
+requiring exact epochs must treat that outcome explicitly rather than substitute a primary FontId.
+
+Windows observes system collection expiration through the retained collection's DirectWrite
+expiration event. Observation performs a zero-timeout event check and at most one collection
+refresh attempt; it creates no polling thread, inventory scan or font-install workflow. An
+unsignalled event and missing-family resolution preserve the collection and generation. A signalled
+event admits one replacement only after its observation capability is established. Refresh failure
+does not publish a qualified replacement. The event belongs to its retained collection and is not
+closed independently. This contract covers platform-observed adoption, with no immediate OS font
+installation notification or observation-latency guarantee. Platforms without a qualified
+observation mechanism report unavailable; the immutable test backend has a stable generation.
+
+Collection adoption and custom-font changes qualify or invalidate positive and negative requested-
+font resolution caches, platform selection/identifier caches and ordinary line-layout caches as
+one environment transition. Unchanged missing-family requests cannot trigger alternating refresh
+and invalidation cycles. FontIds already referenced by returned layouts and renderer resources are
+never recycled or overwritten; old publication remains paintable until its consumer releases it.
+New resolution uses the adopted environment. Cache publication checks the generation surrounding
+resolution or shaping and refuses insertion across an intervening transition. Checked shaping and
+canonical consumers report that mismatch through their typed local failure. Legacy infallible
+shaping may return its coherent uncached result from the captured platform environment; it cannot
+silently return empty text to represent an epoch failure or cache that result in the successor epoch.
+Generation-aware native face retention has a fixed 16,384-face ceiling, including faces from prior
+epochs. A face admission beyond that ceiling refuses before changing the face registry or replacing
+an existing FontId; it never silently evicts a face still used by published glyphs. Generation state
+and current resolver maps retain no historical per-epoch registry. This bounds the new historical
+retention consequence; ordinary source and fragment capacity remains separately caller-owned.
+
+Canonical streaming consumers bind the generation with their other immutable inputs and compare
+it before and after each bounded layout quantum and before publication. A transition invalidates
+incompatible candidates and continuations; no derived geometry or terminal width may be published
+under the successor environment. This API does not own consumer source anchors or viewport policy.
+Acceptance covers stable repeated missing-family requests, positive and negative cache epochs,
+custom-font/system adoption transitions, failures and unsupported observation, old FontId lifetime,
+intervening-change refusal, and native Windows expiration-event access without installing fonts.
 
 ## Image Asset Renderer Cleanup
 

@@ -24,7 +24,7 @@ use windows::{
         Graphics::{Direct3D11::ID3D11Device, Gdi::*},
         Security::Credentials::*,
         System::{Com::*, LibraryLoader::*, Ole::*, SystemInformation::*},
-        UI::{Input::KeyboardAndMouse::*, Shell::*, WindowsAndMessaging::*},
+        UI::{Controls::*, Input::KeyboardAndMouse::*, Shell::*, WindowsAndMessaging::*},
     },
     core::*,
 };
@@ -491,6 +491,23 @@ impl Platform for WindowsPlatform {
             .detach();
 
         rx
+    }
+
+    fn prompt_for_save_path(
+        &self,
+        directory: &Path,
+        suggested_name: Option<&str>,
+    ) -> Receiver<Result<Option<SavePathChoice>>> {
+        let directory = directory.to_owned();
+        let suggested_name = suggested_name.map(str::to_owned);
+        let (sender, receiver) = oneshot::channel();
+        let window = self.find_current_active_window();
+        self.foreground_executor()
+            .spawn(async move {
+                let _ = sender.send(file_save_choice(directory, suggested_name, window));
+            })
+            .detach();
+        receiver
     }
 
     fn can_select_mixed_files_and_dirs(&self) -> bool {
@@ -1090,13 +1107,28 @@ fn file_save_dialog(
     suggested_name: Option<String>,
     window: Option<HWND>,
 ) -> Result<Option<PathBuf>> {
+    Ok(file_save_choice(directory, suggested_name, window)?.map(|choice| choice.path))
+}
+
+fn file_save_choice(
+    directory: PathBuf,
+    suggested_name: Option<String>,
+    window: Option<HWND>,
+) -> Result<Option<SavePathChoice>> {
     let dialog: IFileSaveDialog = unsafe { CoCreateInstance(&FileSaveDialog, None, CLSCTX_ALL)? };
-    if !directory.to_string_lossy().is_empty()
-        && let Some(full_path) = directory
+    file_save_choice_with_dialog(dialog, directory, suggested_name, window)
+}
+
+fn file_save_choice_with_dialog(
+    dialog: IFileSaveDialog,
+    directory: PathBuf,
+    suggested_name: Option<String>,
+    window: Option<HWND>,
+) -> Result<Option<SavePathChoice>> {
+    if !directory.as_os_str().is_empty() {
+        let full_path = directory
             .canonicalize()
-            .context("failed to canonicalize directory")
-            .log_err()
-    {
+            .context("failed to canonicalize directory")?;
         let full_path = SanitizedPath::new(&full_path);
         let full_path_string = full_path.to_string();
         let path_item: IShellItem =
@@ -1104,8 +1136,7 @@ fn file_save_dialog(
         unsafe {
             dialog
                 .SetFolder(&path_item)
-                .context("failed to set dialog folder")
-                .log_err()
+                .context("failed to set dialog folder")?
         };
     }
 
@@ -1113,30 +1144,217 @@ fn file_save_dialog(
         unsafe {
             dialog
                 .SetFileName(&HSTRING::from(suggested_name))
-                .context("failed to set file name")
-                .log_err()
+                .context("failed to set file name")?
         };
     }
 
     unsafe {
+        dialog.SetOptions(dialog.GetOptions()? | FOS_OVERWRITEPROMPT)?;
         dialog.SetFileTypes(&[Common::COMDLG_FILTERSPEC {
             pszName: windows::core::w!("All files"),
             pszSpec: windows::core::w!("*.*"),
         }])?;
-        if dialog.Show(window).is_err() {
-            // User cancelled
-            return Ok(None);
+    }
+    let state = Arc::new(parking_lot::Mutex::new(SaveChoiceState::default()));
+    let events: IFileDialogEvents = SaveChoiceEvents {
+        state: state.clone(),
+    }
+    .into();
+    let cookie = unsafe { dialog.Advise(&events)? };
+    let shown = unsafe { dialog.Show(window) };
+    unsafe { dialog.Unadvise(cookie)? };
+    #[cfg(test)]
+    eprintln!(
+        "native Save terminal callback order: {:?}",
+        state.lock().events
+    );
+    if !save_dialog_outcome(shown, state.lock().failed)? {
+        return Ok(None);
+    }
+    let path = save_item_path(&unsafe { dialog.GetResult()? })?;
+    let mut state = state.lock();
+    if state.failed {
+        return Err(anyhow!("native save choice callback failed"));
+    }
+    let choice = state
+        .accepted
+        .take()
+        .ok_or_else(|| anyhow!("native save choice was not accepted"))?;
+    if choice.path != path {
+        return Err(anyhow!("native save choice changed after acceptance"));
+    }
+    Ok(Some(choice))
+}
+
+fn save_dialog_show_result(result: windows::core::Result<()>) -> Result<bool> {
+    match result {
+        Ok(()) => Ok(true),
+        Err(error) if error.code() == HRESULT::from_win32(ERROR_CANCELLED.0) => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn save_dialog_outcome(result: windows::core::Result<()>, callback_failed: bool) -> Result<bool> {
+    if callback_failed {
+        return Err(anyhow!("native save choice callback failed"));
+    }
+    save_dialog_show_result(result)
+}
+
+fn save_item_path(item: &IShellItem) -> windows::core::Result<PathBuf> {
+    unsafe {
+        let value = item.GetDisplayName(SIGDN_FILESYSPATH)?;
+        let string = value.to_string();
+        CoTaskMemFree(Some(value.0 as _));
+        let path = PathBuf::from(string?);
+        if path.as_os_str().len() > 32768 {
+            return Err(windows::core::Error::from_hresult(E_INVALIDARG));
+        }
+        Ok(path)
+    }
+}
+
+fn confirm_save_overwrite(dialog: &IFileDialog, path: &Path) -> windows::core::Result<bool> {
+    let owner = unsafe { dialog.cast::<IOleWindow>()?.GetWindow()? };
+    if !unsafe { IsWindowVisible(owner).as_bool() && IsWindowEnabled(owner).as_bool() } {
+        return Err(windows::core::Error::from_hresult(E_FAIL));
+    }
+    let content = HSTRING::from(path.to_string_lossy().as_ref());
+    let config = TASKDIALOGCONFIG {
+        cbSize: std::mem::size_of::<TASKDIALOGCONFIG>() as u32,
+        hwndParent: owner,
+        dwFlags: TDF_ALLOW_DIALOG_CANCELLATION | TDF_POSITION_RELATIVE_TO_WINDOW,
+        dwCommonButtons: TDCBF_YES_BUTTON | TDCBF_NO_BUTTON,
+        pszWindowTitle: w!("Save file"),
+        pszMainInstruction: w!("Replace the existing file?"),
+        pszContent: PCWSTR(content.as_ptr()),
+        nDefaultButton: IDNO.0,
+        ..Default::default()
+    };
+    let mut selected = 0;
+    unsafe { TaskDialogIndirect(&config, Some(&mut selected), None, None) }?;
+    match selected {
+        value if value == IDYES.0 => Ok(true),
+        value if value == IDNO.0 || value == IDCANCEL.0 => Ok(false),
+        _ => Err(windows::core::Error::from_hresult(E_FAIL)),
+    }
+}
+
+#[derive(Default)]
+struct SaveChoiceState {
+    overwrite: Option<PathBuf>,
+    accepted: Option<SavePathChoice>,
+    failed: bool,
+    #[cfg(test)]
+    events: Vec<&'static str>,
+}
+
+#[windows::core::implement(IFileDialogEvents)]
+struct SaveChoiceEvents {
+    state: Arc<parking_lot::Mutex<SaveChoiceState>>,
+}
+
+impl IFileDialogEvents_Impl for SaveChoiceEvents_Impl {
+    fn OnFileOk(&self, dialog: windows::core::Ref<'_, IFileDialog>) -> windows::core::Result<()> {
+        let result = (|| save_item_path(&unsafe { dialog.ok()?.GetResult()? }))();
+        let mut state = self.state.lock();
+        #[cfg(test)]
+        if state.events.len() < 64 {
+            state.events.push("file-ok");
+        }
+        match result {
+            Ok(path) => {
+                let replace_existing = state.overwrite.take().as_ref() == Some(&path);
+                state.accepted = Some(SavePathChoice {
+                    path,
+                    replace_existing,
+                });
+                Ok(())
+            }
+            Err(error) => {
+                state.failed = true;
+                Err(error)
+            }
         }
     }
-    let shell_item = unsafe { dialog.GetResult()? };
-    let file_path_string = unsafe {
-        let pwstr = shell_item.GetDisplayName(SIGDN_FILESYSPATH)?;
-        let string = pwstr.to_string()?;
-        CoTaskMemFree(Some(pwstr.0 as _));
-        string
-    };
-    Ok(Some(PathBuf::from(file_path_string)))
+    fn OnFolderChanging(
+        &self,
+        _: windows::core::Ref<'_, IFileDialog>,
+        _: windows::core::Ref<'_, IShellItem>,
+    ) -> windows::core::Result<()> {
+        let mut state = self.state.lock();
+        state.overwrite = None;
+        state.accepted = None;
+        Ok(())
+    }
+    fn OnFolderChange(&self, _: windows::core::Ref<'_, IFileDialog>) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn OnSelectionChange(
+        &self,
+        _: windows::core::Ref<'_, IFileDialog>,
+    ) -> windows::core::Result<()> {
+        let mut state = self.state.lock();
+        state.overwrite = None;
+        state.accepted = None;
+        Ok(())
+    }
+    fn OnShareViolation(
+        &self,
+        _: windows::core::Ref<'_, IFileDialog>,
+        _: windows::core::Ref<'_, IShellItem>,
+    ) -> windows::core::Result<FDE_SHAREVIOLATION_RESPONSE> {
+        let mut state = self.state.lock();
+        state.overwrite = None;
+        state.accepted = None;
+        Ok(FDESVR_DEFAULT)
+    }
+    fn OnTypeChange(&self, _: windows::core::Ref<'_, IFileDialog>) -> windows::core::Result<()> {
+        let mut state = self.state.lock();
+        state.overwrite = None;
+        state.accepted = None;
+        Ok(())
+    }
+    fn OnOverwrite(
+        &self,
+        dialog: windows::core::Ref<'_, IFileDialog>,
+        item: windows::core::Ref<'_, IShellItem>,
+    ) -> windows::core::Result<FDE_OVERWRITE_RESPONSE> {
+        {
+            let mut state = self.state.lock();
+            state.overwrite = None;
+            state.accepted = None;
+        }
+        let result = (|| {
+            let path = save_item_path(item.ok()?)?;
+            let confirmed = confirm_save_overwrite(dialog.ok()?, &path)?;
+            Ok((path, confirmed))
+        })();
+        let mut state = self.state.lock();
+        #[cfg(test)]
+        if state.events.len() < 64 {
+            state.events.push("overwrite");
+        }
+        match result {
+            Ok((path, true)) => {
+                state.overwrite = Some(path);
+                Ok(FDEOR_ACCEPT)
+            }
+            Ok((_, false)) => {
+                state.overwrite = None;
+                Ok(FDEOR_REFUSE)
+            }
+            Err(error) => {
+                state.failed = true;
+                Err(error)
+            }
+        }
+    }
 }
+
+#[cfg(test)]
+#[path = "../../../tests/unit/windows_save_dialog.rs"]
+mod save_dialog_tests;
 
 fn load_icon() -> Result<HICON> {
     let module = unsafe { GetModuleHandleW(None).context("unable to get module handle")? };

@@ -72,6 +72,9 @@ impl Default for CosmicTextSystem {
 }
 
 impl PlatformTextSystem for CosmicTextSystem {
+    fn font_environment_generation(&self) -> Option<u64> {
+        None
+    }
     fn add_fonts(&self, fonts: Vec<Cow<'static, [u8]>>) -> Result<()> {
         self.0.write().add_fonts(fonts)
     }

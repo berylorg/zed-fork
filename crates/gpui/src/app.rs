@@ -1227,6 +1227,15 @@ impl App {
         self.platform.prompt_for_new_path(directory, suggested_name)
     }
 
+    pub fn prompt_for_save_path(
+        &self,
+        directory: &Path,
+        suggested_name: Option<&str>,
+    ) -> oneshot::Receiver<Result<Option<crate::SavePathChoice>>> {
+        self.platform
+            .prompt_for_save_path(directory, suggested_name)
+    }
+
     /// Reveals the specified path at the platform level, such as in Finder on macOS.
     pub fn reveal_path(&self, path: &Path) {
         self.platform.reveal_path(path)

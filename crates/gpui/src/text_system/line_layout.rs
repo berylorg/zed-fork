@@ -529,7 +529,9 @@ impl LineLayoutCache {
         Text: AsRef<str>,
         SharedString: From<Text>,
     {
+        let generation = self.platform_text_system.font_environment_generation();
         let key = &CacheKeyRef {
+            generation,
             text: text.as_ref(),
             font_size,
             runs,
@@ -538,11 +540,19 @@ impl LineLayoutCache {
         } as &dyn AsCacheKeyRef;
 
         let current_frame = self.current_frame.upgradable_read();
-        if let Some(layout) = current_frame.wrapped_lines.get(key) {
+        if let Some(layout) = current_frame
+            .wrapped_lines
+            .get(key)
+            .filter(|_| generation.is_some())
+        {
             return layout.clone();
         }
 
-        let previous_frame_entry = self.previous_frame.lock().wrapped_lines.remove_entry(key);
+        let previous_frame_entry = if generation.is_some() {
+            self.previous_frame.lock().wrapped_lines.remove_entry(key)
+        } else {
+            None
+        };
         if let Some((key, layout)) = previous_frame_entry {
             let mut current_frame = RwLockUpgradableReadGuard::upgrade(current_frame);
             current_frame
@@ -571,6 +581,7 @@ impl LineLayoutCache {
                 wrap_width,
             });
             let key = Arc::new(CacheKey {
+                generation,
                 text,
                 font_size,
                 runs: SmallVec::from(runs),
@@ -578,6 +589,11 @@ impl LineLayoutCache {
                 force_width: None,
             });
 
+            if generation.is_none()
+                || generation != self.platform_text_system.font_environment_generation()
+            {
+                return layout;
+            }
             let mut current_frame = self.current_frame.write();
             current_frame
                 .wrapped_lines
@@ -599,7 +615,12 @@ impl LineLayoutCache {
         Text: AsRef<str>,
         SharedString: From<Text>,
     {
+        let generation = self.platform_text_system.font_environment_generation();
+        if generation.is_none() {
+            return self.layout_line_uncached(text.as_ref(), font_size, runs, force_width);
+        }
         let key = &CacheKeyRef {
+            generation,
             text: text.as_ref(),
             font_size,
             runs,
@@ -626,6 +647,7 @@ impl LineLayoutCache {
             apply_force_width(&mut layout, force_width);
 
             let key = Arc::new(CacheKey {
+                generation,
                 text,
                 font_size,
                 runs: SmallVec::from(runs),
@@ -633,6 +655,9 @@ impl LineLayoutCache {
                 force_width,
             });
             let layout = Arc::new(layout);
+            if generation != self.platform_text_system.font_environment_generation() {
+                return layout;
+            }
             current_frame.lines.insert(key.clone(), layout.clone());
             current_frame.used_lines.push(key);
             layout
@@ -652,7 +677,7 @@ impl LineLayoutCache {
     }
 }
 
-fn apply_force_width(layout: &mut LineLayout, force_width: Option<Pixels>) {
+pub(super) fn apply_force_width(layout: &mut LineLayout, force_width: Option<Pixels>) {
     if let Some(force_width) = force_width {
         let mut glyph_pos = 0;
         for run in layout.runs.iter_mut() {
@@ -679,6 +704,7 @@ trait AsCacheKeyRef {
 
 #[derive(Clone, Debug, Eq)]
 struct CacheKey {
+    generation: Option<u64>,
     text: SharedString,
     font_size: Pixels,
     runs: SmallVec<[FontRun; 1]>,
@@ -688,6 +714,7 @@ struct CacheKey {
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 struct CacheKeyRef<'a> {
+    generation: Option<u64>,
     text: &'a str,
     font_size: Pixels,
     runs: &'a [FontRun],
@@ -712,6 +739,7 @@ impl Hash for dyn AsCacheKeyRef + '_ {
 impl AsCacheKeyRef for CacheKey {
     fn as_cache_key_ref(&self) -> CacheKeyRef<'_> {
         CacheKeyRef {
+            generation: self.generation,
             text: &self.text,
             font_size: self.font_size,
             runs: self.runs.as_slice(),
