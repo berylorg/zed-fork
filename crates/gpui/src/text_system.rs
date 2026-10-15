@@ -388,25 +388,6 @@ impl TextSystem {
         }
     }
 
-    pub(crate) fn rasterize_glyph(
-        &self,
-        params: &RenderGlyphParams,
-    ) -> Result<(Size<DevicePixels>, Vec<u8>)> {
-        let raster_bounds = self.raster_bounds(params)?;
-        self.platform_text_system
-            .rasterize_glyph(params, raster_bounds)
-    }
-}
-
-/// The GPUI text layout subsystem.
-#[derive(Deref)]
-pub struct WindowTextSystem {
-    line_layout_cache: LineLayoutCache,
-    #[deref]
-    text_system: Arc<TextSystem>,
-}
-
-impl WindowTextSystem {
     pub fn layout_line_checked(
         &self,
         text: &str,
@@ -436,6 +417,26 @@ impl WindowTextSystem {
         }
         Ok(Arc::new(layout))
     }
+
+    pub(crate) fn rasterize_glyph(
+        &self,
+        params: &RenderGlyphParams,
+    ) -> Result<(Size<DevicePixels>, Vec<u8>)> {
+        let raster_bounds = self.raster_bounds(params)?;
+        self.platform_text_system
+            .rasterize_glyph(params, raster_bounds)
+    }
+}
+
+/// The GPUI text layout subsystem.
+#[derive(Deref)]
+pub struct WindowTextSystem {
+    line_layout_cache: LineLayoutCache,
+    #[deref]
+    text_system: Arc<TextSystem>,
+}
+
+impl WindowTextSystem {
     pub fn font_environment_key(&self) -> Option<FontEnvironmentKey> {
         self.text_system.font_environment_key()
     }

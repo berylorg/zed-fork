@@ -5180,6 +5180,11 @@ impl Window {
     }
 
     #[cfg(any(test, feature = "test-support"))]
+    pub fn debug_bounds_for_test(&self, selector: &str) -> Option<Bounds<Pixels>> {
+        self.rendered_frame.debug_bounds.get(selector).copied()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
     #[allow(missing_docs)]
     pub fn paint_snapshot_for_test(&self) -> crate::test::PaintSnapshot {
         let scene = &self.next_frame.scene;

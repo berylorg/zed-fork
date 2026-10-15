@@ -42,6 +42,55 @@ fn immutable_test_backend_stays_qualified(cx: &mut gpui::TestAppContext) {
 }
 
 #[cfg(feature = "test-support")]
+#[gpui::test]
+fn shared_app_text_system_checks_layout_before_any_window(cx: &mut gpui::TestAppContext) {
+    let text_system = cx.text_system();
+    let caption = "Pinned controls";
+    let runs = [gpui::TextStyle::default().to_run(caption.len())];
+    let checked = text_system
+        .layout_line_checked(caption, px(13.), &runs, None)
+        .unwrap();
+    assert!(checked.width > px(0.));
+    let forced = text_system
+        .layout_line_checked(caption, px(13.), &runs, Some(px(250.)))
+        .unwrap();
+    assert_eq!(forced.width, checked.width);
+    let forced_positions = forced
+        .runs
+        .iter()
+        .flat_map(|run| run.glyphs.iter().map(|glyph| glyph.position.x))
+        .collect::<Vec<_>>();
+    assert!(forced_positions.len() > 1);
+    for (index, position) in forced_positions.iter().enumerate() {
+        assert_eq!(*position, px(index as f32 * 250.));
+    }
+    cx.add_empty_window().update(|window, _| {
+        let rendered = window
+            .text_system()
+            .shape_line(caption.into(), px(13.), &runs, None);
+        let checked_window = window
+            .text_system()
+            .layout_line_checked(caption, px(13.), &runs, None)
+            .unwrap();
+        assert_eq!(checked.width, rendered.width);
+        assert_eq!(checked.width, checked_window.width);
+        let forced_window = window
+            .text_system()
+            .layout_line_checked(caption, px(13.), &runs, Some(px(250.)))
+            .unwrap();
+        assert_eq!(forced_window.width, forced.width);
+        assert_eq!(
+            forced_window
+                .runs
+                .iter()
+                .flat_map(|run| run.glyphs.iter().map(|glyph| glyph.position.x))
+                .collect::<Vec<_>>(),
+            forced_positions
+        );
+    });
+}
+
+#[cfg(feature = "test-support")]
 #[test]
 fn positive_and_negative_requested_fonts_share_one_epoch() {
     let context = FontEnvironmentTestContext::new();

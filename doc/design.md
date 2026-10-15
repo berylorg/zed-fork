@@ -161,6 +161,12 @@ Native Windows evidence must prove actual client bounds, original identity and p
 state/visibility/focus; simulated bounds alone do not establish those effects. Independent
 semantic review covers operation custody, acknowledgement and consumer publication eligibility.
 
+The opt-in `test-support` boundary exposes `Window::debug_bounds_for_test` as a read-only lookup
+of one selector's bounds in the current rendered frame. It returns no bounds before that selector
+has rendered and does not draw, measure again, retain a frame or alter native state. This lets a
+native consumer compare its actual rendered composition with acknowledged client dimensions
+without substituting a simulated window. The query is absent from ordinary production builds.
+
 ## Application Lifetime After The Last Window Closes
 
 `Application::with_quit_on_last_window_close(bool)` is a startup-only option configured before
@@ -476,6 +482,12 @@ epochs. A face admission beyond that ceiling refuses before changing the face re
 an existing FontId; it never silently evicts a face still used by published glyphs. Generation state
 and current resolver maps retain no historical per-epoch registry. This bounds the new historical
 retention consequence; ordinary source and fragment capacity remains separately caller-owned.
+
+`TextSystem::layout_line_checked` exposes checked single-line layout before native window
+construction, using the same font resolution, platform layout and surrounding font-environment
+checks as window consumers. It creates no window or per-window layout cache. `WindowTextSystem`
+retains access through its existing dereference to the shared text system. Failure remains typed
+and cannot substitute an approximate width or authorize consumer publication.
 
 Canonical streaming consumers bind the generation with their other immutable inputs and compare
 it before and after each bounded layout quantum and before publication. A transition invalidates
