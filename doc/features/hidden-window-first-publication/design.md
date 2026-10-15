@@ -24,6 +24,9 @@ incomplete surface, then explicitly publish that same window as its first user-v
   ownership, callbacks, and configured properties that first publication later exposes.
 - Construction options fix the initially windowed, maximized, or fullscreen native state before
   the hidden window is created. First publication preserves that state.
+- The root design's checked Windows minimum update may prepare an unpublished window's bounds
+  without publishing it or consuming first-publication authority. Its state-specific refusal
+  remains a refusal; it cannot change initial state or visibility to make the minimum fit.
 - Maximize and fullscreen requests made while the window remains unpublished are inert: they do
   not change its fixed initial state, publish it, or activate it. Those operations resume their
   ordinary behavior after publication.

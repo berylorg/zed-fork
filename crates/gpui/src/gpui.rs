@@ -49,6 +49,11 @@ mod text_system;
 mod util;
 mod view;
 mod window;
+mod window_minimum;
+pub use window_minimum::{
+    WindowMinimumUpdate, WindowMinimumUpdateError, WindowMinimumUpdateFailure,
+    WindowMinimumUpdateOutcome,
+};
 
 #[cfg(doc)]
 pub mod _ownership_and_data_flow;

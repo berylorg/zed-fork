@@ -19,6 +19,11 @@ mod system_settings;
 mod util;
 mod vsync;
 mod window;
+mod window_minimum;
+#[cfg(feature = "test-support")]
+pub use window_minimum::{
+    WindowsWindowMinimumTestFault, with_windows_window_minimum_fault_for_test,
+};
 mod wrapper;
 
 pub(crate) use clipboard::*;

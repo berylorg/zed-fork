@@ -213,6 +213,17 @@ impl WindowsWindowState {
 }
 
 impl WindowsWindowInner {
+    pub(super) fn minimum_initial_state(&self) -> Option<InitialWindowState> {
+        self.state
+            .borrow()
+            .initial_placement
+            .as_ref()
+            .map(|status| match status.state {
+                WindowOpenState::Windowed => InitialWindowState::Windowed,
+                WindowOpenState::Maximized => InitialWindowState::Maximized,
+                WindowOpenState::Fullscreen => InitialWindowState::Fullscreen,
+            })
+    }
     fn new(context: &mut WindowCreateContext, hwnd: HWND, cs: &CREATESTRUCTW) -> Result<Rc<Self>> {
         if let Some(monitor) = context.prepared_monitor {
             monitor.validate_window(hwnd)?;
@@ -249,7 +260,7 @@ impl WindowsWindowInner {
         }))
     }
 
-    fn set_fullscreen(&self) -> Result<()> {
+    pub(super) fn set_fullscreen(&self) -> Result<()> {
         anyhow::ensure!(
             !self.native_exposure_blocked(),
             "native window operation or close intent prevents fullscreen changes"
@@ -580,7 +591,7 @@ impl WindowsWindow {
         run_window_creation_hook(hwnd)?;
         configure_dwm_dark_mode(hwnd, appearance);
         this.state.borrow_mut().border_offset.update(hwnd)?;
-        let placement = if let Some(outer_placement) = outer_placement {
+        let mut placement = if let Some(outer_placement) = outer_placement {
             WINDOWPLACEMENT {
                 length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
                 rcNormalPosition: super::placement::bounds_rect(
@@ -602,7 +613,23 @@ impl WindowsWindow {
             InitialWindowState::Fullscreen => WindowOpenState::Fullscreen,
             InitialWindowState::Windowed => WindowOpenState::Windowed,
         };
-        if let Some(monitor) = prepared_monitor {
+        if let Some(minimum) = params.window_min_size {
+            this.prepare_initial_minimum(minimum, params.initial_state, &mut placement)?;
+            placement.showCmd = SW_HIDE.0 as u32;
+            unsafe { SetWindowPlacement(hwnd, &placement) }
+                .context("failed to prepare initial minimum window bounds")?;
+            if matches!(state, WindowOpenState::Fullscreen) {
+                this.set_fullscreen()?;
+            }
+            this.verify_initial_minimum(minimum)?;
+            if let Some(monitor) = prepared_monitor {
+                monitor.validate_window(hwnd)?;
+            }
+            this.state.borrow_mut().initial_placement = Some(WindowOpenStatus { state });
+            if params.show {
+                this.set_window_placement()?;
+            }
+        } else if let Some(monitor) = prepared_monitor {
             let mut hidden_placement = placement;
             hidden_placement.showCmd = SW_HIDE.0 as u32;
             unsafe { SetWindowPlacement(hwnd, &hidden_placement) }
@@ -667,6 +694,17 @@ impl Drop for WindowsWindow {
 }
 
 impl PlatformWindow for WindowsWindow {
+    #[cfg(feature = "test-support")]
+    fn minimum_size_for_test(&self) -> Option<Size<Pixels>> {
+        self.0.state.borrow().min_size
+    }
+
+    fn update_minimum_size(
+        &mut self,
+        minimum: Size<Pixels>,
+    ) -> std::result::Result<WindowMinimumUpdate, WindowMinimumUpdateError> {
+        self.0.update_minimum_size(minimum)
+    }
     fn recoverable_destruction_blocks_removal(&self) -> bool {
         self.0.recoverable_destruction_blocks_removal()
     }
@@ -742,6 +780,16 @@ impl PlatformWindow for WindowsWindow {
             return false;
         }
         self.0.state.borrow().is_maximized()
+    }
+
+    fn is_minimized(&self) -> Option<bool> {
+        if self.0.native_operation.borrow().native_destroyed {
+            return None;
+        }
+        if !unsafe { IsWindow(Some(self.0.hwnd)) }.as_bool() {
+            return None;
+        }
+        Some(unsafe { IsIconic(self.0.hwnd) }.as_bool())
     }
 
     fn window_bounds(&self) -> WindowBounds {

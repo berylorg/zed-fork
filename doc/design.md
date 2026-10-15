@@ -114,6 +114,53 @@ never acquires or mutates the Operator's clipboard. It restores the original pro
 thread desktop and closes only test-owned handles after destroying its message-only owner window.
 Independent semantic review covers unsafe native memory access, complete acknowledgement and bounds.
 
+## Checked Window Minimum Updates On Windows
+
+`Window::update_minimum_size` accepts a logical client `Size<Pixels>` for the original live
+window and returns a move-only `WindowMinimumUpdate` future or a `WindowMinimumUpdateError`.
+Its typed completion is `WindowMinimumUpdateOutcome`, carrying the accepted minimum and actual
+client size on `Applied`, a `WindowMinimumUpdateFailure` on `NotApplied`, or `Unverified`.
+`Window::is_minimized` provides a read-only `Option<bool>` observation for Windows and the test
+platform; unavailable backends or a lost native owner return `None`. A window-bounds wakeup alone
+does not prove restoration. This observation authorizes no native mutation or minimum publication.
+Admission accepts positive finite dimensions representable at the window's native scale; invalid
+dimensions, another active native operation, or closing/destruction return `InvalidMinimum`,
+`Busy`, or `Closed` without mutation. Unsupported native backends return `Unavailable`.
+An admitted operation retains the original native owner and executes on the existing foreground
+executor outside App, entity and platform-state borrows. It creates no replacement or operation
+queue and does not publish, activate, focus, reorder, minimize, maximize or restore the window.
+
+For an ordinary windowed owner, including an unpublished owner, grow only deficient dimensions
+while preserving origin. `Applied` acknowledges the new persistent tracking minimum and actual
+client dimensions satisfying it. Adequate dimensions remain unchanged. Hidden initial placement,
+visibility and first-publication state remain authoritative; checking a minimum consumes no
+first-publication lease. A minimized owner returns `NotApplied(Minimized)` without mutation.
+A maximized owner, including an unpublished initially maximized owner, accepts the update only
+when its drawable area and existing normal restore dimensions both satisfy it; otherwise return
+`NotApplied(InsufficientSpace)` without changing state. This boundary writes no minimized or
+maximized restore placement and never changes native state to make a request fit.
+Fullscreen owners return `NotApplied(UnsupportedState)` without mutation.
+
+Native failure with verified resulting state returns `NotApplied(NativeFailure)`; inability to
+verify the resulting state returns `Unverified`. Non-success restores the previous tracking
+minimum and authorizes no consumer candidate publication. An enlargement already performed may
+remain; exact bounds rollback is not promised. Closure invalidates consumer publication.
+Dropping the completion receiver does not cancel admitted work: its original owner releases
+native-operation exclusion and settles deferred closure independently of receipt consumption.
+
+Construction applies the declared initial client minimum before exposure, growing only deficient
+initial windowed dimensions while preserving adequate requested geometry. Initial normal versus
+maximized state remains fixed. Geometry that cannot satisfy the minimum in its declared state
+fails explicitly rather than exposing an undersized surface or changing that state.
+
+The test platform models minimum state, checked outcomes and resize notification outside its
+state borrow. Qualification covers ordinary and hidden growth, unchanged adequate dimensions,
+minimized deferral and ordinary restoration, maximized acceptance/refusal, invalid dimensions,
+native refusal and failed verification, receiver disposal and closure during an admitted update.
+Native Windows evidence must prove actual client bounds, original identity and preserved native
+state/visibility/focus; simulated bounds alone do not establish those effects. Independent
+semantic review covers operation custody, acknowledgement and consumer publication eligibility.
+
 ## Application Lifetime After The Last Window Closes
 
 `Application::with_quit_on_last_window_close(bool)` is a startup-only option configured before

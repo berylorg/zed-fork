@@ -17,6 +17,11 @@ use std::{
 };
 
 pub(crate) struct TestWindowState {
+    minimum: Option<Size<Pixels>>,
+    minimum_active: bool,
+    minimum_failure: Option<bool>,
+    normal_restore_size: Size<Pixels>,
+    closed: bool,
     pub(crate) bounds: Bounds<Pixels>,
     pub(crate) handle: AnyWindowHandle,
     display: Rc<dyn PlatformDisplay>,
@@ -51,8 +56,22 @@ pub enum TestWindowStateKind {
     Fullscreen,
 }
 
-#[derive(Clone)]
-pub(crate) struct TestWindow(pub(crate) Rc<Mutex<TestWindowState>>);
+pub(crate) struct TestWindow(pub(crate) Rc<Mutex<TestWindowState>>, bool);
+
+impl Clone for TestWindow {
+    fn clone(&self) -> Self {
+        // Observation clones do not own the platform window's close.
+        Self(self.0.clone(), false)
+    }
+}
+
+impl Drop for TestWindow {
+    fn drop(&mut self) {
+        if self.1 {
+            self.0.lock().closed = true;
+        }
+    }
+}
 
 impl HasWindowHandle for TestWindow {
     fn window_handle(
@@ -76,42 +95,70 @@ impl TestWindow {
         params: WindowParams,
         platform: Weak<TestPlatform>,
         display: Rc<dyn PlatformDisplay>,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
+        let mut initial_bounds = params.bounds;
+        if let Some(minimum) = params.window_min_size {
+            let required = crate::window_minimum::checked_tracking_minimum(minimum, 2., (0, 0))?;
+            if params.initial_state == InitialWindowState::Windowed {
+                initial_bounds.size.width = initial_bounds
+                    .size
+                    .width
+                    .max(crate::px(required.width.0 as f32 / 2.));
+                initial_bounds.size.height = initial_bounds
+                    .size
+                    .height
+                    .max(crate::px(required.height.0 as f32 / 2.));
+            } else {
+                anyhow::ensure!(
+                    initial_bounds.size.width.0 * 2. >= required.width.0 as f32
+                        && initial_bounds.size.height.0 * 2. >= required.height.0 as f32,
+                    "initial test window cannot satisfy its declared minimum"
+                );
+            }
+        }
         let active = params.show && params.focus;
-        let window = Self(Rc::new(Mutex::new(TestWindowState {
-            bounds: params.bounds,
-            display,
-            platform: platform.clone(),
-            handle,
-            sprite_atlas: Arc::new(TestAtlas::new()),
-            image_resources: Arc::new(TestImageResources::new()),
-            title: Default::default(),
-            edited: false,
-            should_close_handler: None,
-            hit_test_window_control_callback: None,
-            input_callback: None,
-            active_status_change_callback: None,
-            hover_status_change_callback: None,
-            resize_callback: None,
-            moved_callback: None,
-            input_handler: None,
-            window_state: match params.initial_state {
-                InitialWindowState::Windowed => TestWindowStateKind::Windowed,
-                InitialWindowState::Maximized => TestWindowStateKind::Maximized,
-                InitialWindowState::Fullscreen => TestWindowStateKind::Fullscreen,
-            },
-            visible: params.show,
-            visibility_change_count: 0,
-            fail_next_visibility_change: false,
-            active,
-            activation_change_count: usize::from(active),
-            minimized: false,
-            minimize_change_count: 0,
-        })));
+        let window = Self(
+            Rc::new(Mutex::new(TestWindowState {
+                minimum: params.window_min_size,
+                minimum_active: false,
+                minimum_failure: None,
+                normal_restore_size: initial_bounds.size,
+                closed: false,
+                bounds: initial_bounds,
+                display,
+                platform: platform.clone(),
+                handle,
+                sprite_atlas: Arc::new(TestAtlas::new()),
+                image_resources: Arc::new(TestImageResources::new()),
+                title: Default::default(),
+                edited: false,
+                should_close_handler: None,
+                hit_test_window_control_callback: None,
+                input_callback: None,
+                active_status_change_callback: None,
+                hover_status_change_callback: None,
+                resize_callback: None,
+                moved_callback: None,
+                input_handler: None,
+                window_state: match params.initial_state {
+                    InitialWindowState::Windowed => TestWindowStateKind::Windowed,
+                    InitialWindowState::Maximized => TestWindowStateKind::Maximized,
+                    InitialWindowState::Fullscreen => TestWindowStateKind::Fullscreen,
+                },
+                visible: params.show,
+                visibility_change_count: 0,
+                fail_next_visibility_change: false,
+                active,
+                activation_change_count: usize::from(active),
+                minimized: false,
+                minimize_change_count: 0,
+            })),
+            true,
+        );
         if active && let Some(platform) = platform.upgrade() {
             platform.set_active_window(Some(window.clone()));
         }
-        window
+        Ok(window)
     }
 
     pub fn simulate_resize(&mut self, size: Size<Pixels>) {
@@ -158,6 +205,119 @@ impl TestWindow {
 }
 
 impl PlatformWindow for TestWindow {
+    #[cfg(feature = "test-support")]
+    fn minimum_size_for_test(&self) -> Option<Size<Pixels>> {
+        self.0.lock().minimum
+    }
+
+    #[cfg(feature = "test-support")]
+    fn fail_next_minimum_update_for_test(&mut self, unverified: bool) {
+        self.0.lock().minimum_failure = Some(unverified);
+    }
+
+    fn update_minimum_size(
+        &mut self,
+        minimum: Size<Pixels>,
+    ) -> Result<crate::WindowMinimumUpdate, crate::WindowMinimumUpdateError> {
+        use crate::{
+            Platform, WindowMinimumUpdateError as Error, WindowMinimumUpdateFailure as Failure,
+            WindowMinimumUpdateOutcome as Outcome,
+        };
+        let required = crate::window_minimum::checked_minimum_pixels(minimum, 2., (0, 0))?;
+        let executor = {
+            let mut state = self.0.lock();
+            if state.closed {
+                return Err(Error::Closed);
+            }
+            if state.minimum_active {
+                return Err(Error::Busy);
+            }
+            let executor = state
+                .platform
+                .upgrade()
+                .ok_or(Error::Closed)?
+                .foreground_executor();
+            state.minimum_active = true;
+            executor
+        };
+        let (sender, completion) = crate::window_minimum::minimum_update_channel();
+        let owner = self.0.clone();
+        executor
+            .spawn(async move {
+                let (outcome, callback, previous) = {
+                    let mut state = owner.lock();
+                    let previous = state.minimum;
+                    let previous_size = state.bounds.size;
+                    let outcome = if state.closed {
+                        Outcome::NotApplied(Failure::Closed)
+                    } else if state.minimized {
+                        Outcome::NotApplied(Failure::Minimized)
+                    } else if state.window_state == TestWindowStateKind::Fullscreen {
+                        Outcome::NotApplied(Failure::UnsupportedState)
+                    } else if let Some(unverified) = state.minimum_failure.take() {
+                        if unverified {
+                            Outcome::Unverified
+                        } else {
+                            Outcome::NotApplied(Failure::NativeFailure)
+                        }
+                    } else if state.window_state == TestWindowStateKind::Maximized
+                        && (state.bounds.size.width.0 * 2. < required.width.0 as f32
+                            || state.bounds.size.height.0 * 2. < required.height.0 as f32
+                            || state.normal_restore_size.width.0 * 2. < required.width.0 as f32
+                            || state.normal_restore_size.height.0 * 2. < required.height.0 as f32)
+                    {
+                        Outcome::NotApplied(Failure::InsufficientSpace)
+                    } else {
+                        state.minimum = Some(minimum);
+                        state.bounds.size.width = state
+                            .bounds
+                            .size
+                            .width
+                            .max(crate::px(required.width.0 as f32 / 2.));
+                        state.bounds.size.height = state
+                            .bounds
+                            .size
+                            .height
+                            .max(crate::px(required.height.0 as f32 / 2.));
+                        if state.window_state == TestWindowStateKind::Windowed {
+                            state.normal_restore_size = state.bounds.size;
+                        }
+                        Outcome::Applied {
+                            minimum,
+                            client_size: state.bounds.size,
+                        }
+                    };
+                    if !matches!(outcome, Outcome::Applied { .. }) {
+                        state.minimum = previous;
+                    }
+                    let callback = if state.bounds.size != previous_size {
+                        state.resize_callback.take()
+                    } else {
+                        None
+                    };
+                    (outcome, callback, previous)
+                };
+                if let Some(mut callback) = callback {
+                    if let Outcome::Applied { client_size, .. } = outcome {
+                        callback(client_size, 2.);
+                    }
+                    owner.lock().resize_callback = Some(callback);
+                }
+                let mut state = owner.lock();
+                state.minimum_active = false;
+                let outcome = if state.closed {
+                    state.minimum = previous;
+                    Outcome::NotApplied(Failure::Closed)
+                } else {
+                    outcome
+                };
+                drop(state);
+                let _ = sender.send(outcome);
+            })
+            .detach();
+        Ok(completion)
+    }
+
     fn bounds(&self) -> Bounds<Pixels> {
         self.0.lock().bounds
     }
@@ -175,13 +335,24 @@ impl PlatformWindow for TestWindow {
         self.0.lock().window_state == TestWindowStateKind::Maximized
     }
 
+    fn is_minimized(&self) -> Option<bool> {
+        let state = self.0.lock();
+        (!state.closed).then_some(state.minimized)
+    }
+
     fn content_size(&self) -> Size<Pixels> {
         self.bounds().size
     }
 
     fn resize(&mut self, size: Size<Pixels>) {
         let mut lock = self.0.lock();
+        if lock.minimum_active || lock.closed {
+            return;
+        }
         lock.bounds.size = size;
+        if lock.window_state == TestWindowStateKind::Windowed {
+            lock.normal_restore_size = size;
+        }
     }
 
     fn scale_factor(&self) -> f32 {
@@ -234,7 +405,34 @@ impl PlatformWindow for TestWindow {
     }
 
     fn activate(&self) {
-        let platform = self.0.lock().platform.upgrade().unwrap();
+        use crate::Platform;
+
+        let (platform, restored) = {
+            let mut state = self.0.lock();
+            if state.minimum_active || state.closed {
+                return;
+            }
+            let restored = if state.minimized {
+                state.minimized = false;
+                state
+                    .resize_callback
+                    .take()
+                    .map(|callback| (callback, state.bounds.size))
+            } else {
+                None
+            };
+            (state.platform.upgrade().unwrap(), restored)
+        };
+        if let Some((mut callback, size)) = restored {
+            let owner = self.0.clone();
+            platform
+                .foreground_executor()
+                .spawn(async move {
+                    callback(size, 2.);
+                    owner.lock().resize_callback = Some(callback);
+                })
+                .detach();
+        }
         platform.set_active_window(Some(self.clone()))
     }
 
@@ -254,6 +452,10 @@ impl PlatformWindow for TestWindow {
 
     fn map_window(&mut self) -> anyhow::Result<()> {
         let mut lock = self.0.lock();
+        anyhow::ensure!(
+            !lock.minimum_active && !lock.closed,
+            "native minimum operation or closure prevents publication"
+        );
         if lock.fail_next_visibility_change {
             lock.fail_next_visibility_change = false;
             anyhow::bail!("test visibility transition failed")
@@ -279,12 +481,18 @@ impl PlatformWindow for TestWindow {
 
     fn minimize(&self) {
         let mut lock = self.0.lock();
+        if lock.minimum_active || lock.closed {
+            return;
+        }
         lock.minimized = true;
         lock.minimize_change_count += 1;
     }
 
     fn zoom(&self) {
         let mut lock = self.0.lock();
+        if lock.minimum_active || lock.closed {
+            return;
+        }
         lock.window_state = if lock.window_state == TestWindowStateKind::Maximized {
             TestWindowStateKind::Windowed
         } else {
@@ -294,6 +502,9 @@ impl PlatformWindow for TestWindow {
 
     fn toggle_fullscreen(&self) {
         let mut lock = self.0.lock();
+        if lock.minimum_active || lock.closed {
+            return;
+        }
         lock.window_state = if lock.window_state == TestWindowStateKind::Fullscreen {
             TestWindowStateKind::Windowed
         } else {

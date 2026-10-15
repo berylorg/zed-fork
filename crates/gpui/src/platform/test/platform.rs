@@ -324,7 +324,7 @@ impl Platform for TestPlatform {
             params,
             self.weak.clone(),
             self.active_display.clone(),
-        );
+        )?;
         Ok(Box::new(window))
     }
 

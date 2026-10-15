@@ -351,7 +351,7 @@ impl WindowsWindowInner {
             .detach();
     }
 
-    fn destroy_native_window(&self) -> Result<()> {
+    pub(super) fn destroy_native_window(&self) -> Result<()> {
         let result = self.try_destroy_native_window();
         if let Err(error) = &result {
             self.complete_native_destruction(Err(anyhow::anyhow!("{error:#}")));

@@ -50,6 +50,8 @@ pub use windows::{
 pub use windows::{
     WindowsNativeWindowDestructionTestFault, with_windows_window_destruction_fault_for_test,
 };
+#[cfg(all(target_os = "windows", feature = "test-support"))]
+pub use windows::{WindowsWindowMinimumTestFault, with_windows_window_minimum_fault_for_test};
 
 #[cfg(all(
     feature = "screen-capture",
@@ -993,6 +995,21 @@ pub struct AtlasKindDiagnostic {
 }
 
 pub(crate) trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
+    #[cfg(feature = "test-support")]
+    fn minimum_size_for_test(&self) -> Option<Size<Pixels>> {
+        None
+    }
+
+    #[cfg(feature = "test-support")]
+    fn fail_next_minimum_update_for_test(&mut self, _unverified: bool) {}
+
+    fn update_minimum_size(
+        &mut self,
+        _minimum: Size<Pixels>,
+    ) -> std::result::Result<crate::WindowMinimumUpdate, crate::WindowMinimumUpdateError> {
+        Err(crate::WindowMinimumUpdateError::Unavailable)
+    }
+
     fn recoverable_destruction_blocks_removal(&self) -> bool {
         false
     }
@@ -1051,6 +1068,9 @@ pub(crate) trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
 
     fn bounds(&self) -> Bounds<Pixels>;
     fn is_maximized(&self) -> bool;
+    fn is_minimized(&self) -> Option<bool> {
+        None
+    }
     fn window_bounds(&self) -> WindowBounds;
     fn content_size(&self) -> Size<Pixels>;
     fn resize(&mut self, size: Size<Pixels>);

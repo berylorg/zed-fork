@@ -1671,6 +1671,14 @@ impl Window {
         self.platform_window.is_maximized()
     }
 
+    #[allow(missing_docs)]
+    pub fn is_minimized(&self) -> Option<bool> {
+        if self.removed {
+            return None;
+        }
+        self.platform_window.is_minimized()
+    }
+
     /// request a certain window decoration (Wayland)
     pub fn request_decorations(&self, decorations: WindowDecorations) {
         self.platform_window.request_decorations(decorations);
@@ -1912,6 +1920,30 @@ impl Window {
     /// Set the content size of the window.
     pub fn resize(&mut self, size: Size<Pixels>) {
         self.platform_window.resize(size);
+    }
+
+    #[allow(missing_docs)]
+    pub fn update_minimum_size(
+        &mut self,
+        minimum: Size<Pixels>,
+    ) -> std::result::Result<crate::WindowMinimumUpdate, crate::WindowMinimumUpdateError> {
+        if self.removed {
+            return Err(crate::WindowMinimumUpdateError::Closed);
+        }
+        self.platform_window.update_minimum_size(minimum)
+    }
+
+    #[cfg(feature = "test-support")]
+    #[allow(missing_docs)]
+    pub fn minimum_size_for_test(&self) -> Option<Size<Pixels>> {
+        self.platform_window.minimum_size_for_test()
+    }
+
+    #[cfg(feature = "test-support")]
+    #[allow(missing_docs)]
+    pub fn fail_next_minimum_update_for_test(&mut self, unverified: bool) {
+        self.platform_window
+            .fail_next_minimum_update_for_test(unverified);
     }
 
     /// Returns whether or not the window is currently fullscreen

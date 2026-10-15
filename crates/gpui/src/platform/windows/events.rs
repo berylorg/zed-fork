@@ -166,12 +166,23 @@ impl WindowsWindowInner {
         let scale_factor = lock.scale_factor;
         let boarder_offset = lock.border_offset;
         drop(lock);
+        let tracking = crate::window_minimum::checked_tracking_minimum(
+            min_size,
+            scale_factor,
+            (boarder_offset.width_offset, boarder_offset.height_offset),
+        );
         unsafe {
             let minmax_info = &mut *(lparam.0 as *mut MINMAXINFO);
-            minmax_info.ptMinTrackSize.x =
-                min_size.width.scale(scale_factor).0 as i32 + boarder_offset.width_offset;
-            minmax_info.ptMinTrackSize.y =
-                min_size.height.scale(scale_factor).0 as i32 + boarder_offset.height_offset;
+            match tracking {
+                Ok(minimum) => {
+                    minmax_info.ptMinTrackSize.x = minimum.width.0 + boarder_offset.width_offset;
+                    minmax_info.ptMinTrackSize.y = minimum.height.0 + boarder_offset.height_offset;
+                }
+                Err(_) => {
+                    minmax_info.ptMinTrackSize.x = i32::MAX;
+                    minmax_info.ptMinTrackSize.y = i32::MAX;
+                }
+            }
         }
         Some(0)
     }
@@ -1559,7 +1570,7 @@ pub(crate) fn current_capslock() -> Capslock {
     Capslock { on }
 }
 
-fn get_client_area_insets(
+pub(super) fn get_client_area_insets(
     handle: HWND,
     is_maximized: bool,
     windows_version: WindowsVersion,
