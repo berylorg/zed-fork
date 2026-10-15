@@ -11,9 +11,9 @@ SHA256 `FC7A87CC4D411DD407074AAA74E4E6D78C66CABB44158DC041F5281821DE8226`.
 The unchanged lock SHA256 is `CB57266DEF1A468DCF261980B46EC617640C8B2A69AE522C631122D795339C7E`.
 This evidence file is outside that patch. No manifests or dependencies changed.
 
-The observed native host was Windows 11 Pro build 26200. Commands used stable rustc 1.97.1,
-LLVM linking, one Cargo job, nonincremental compilation, graph-wide debug information disabled
-and serial tests. Production features were `--no-default-features --features windows-manifest`;
+The observed native host was Windows 11 Pro build 26200. The production check and final replay
+used stable rustc 1.97.1, LLVM linking, one Cargo job, nonincremental compilation, graph-wide debug
+information disabled and serial tests. Production features were `--no-default-features --features windows-manifest`;
 test features additionally enabled `test-support`. Existing native fixture deadlines remained
 unchanged. Process error mode was restored after each native packet.
 
@@ -29,6 +29,14 @@ A subsequent native-test-only precision correction passed all seven native cases
 model and the other 18 existing lifecycle cases were unchanged; the previous production check
 and 22 nonchanged cases remain qualified. Raw inputs, patches and output are retained under
 Beryl's `.aipm/tasks/native-main-window-minimum/run-003` and `run-004` through integration review.
+
+Integration inspection found the earlier `cargo --config ... nextest run` form did not forward
+that override to nextest's child Cargo build. Those packets establish their observed behavior,
+but not the stated LLVM test-build configuration. The corrected `cargo nextest run --config ...`
+replay at source commit `4529c9305c53a921871b9c84e388321d7a8daa9d` passed all 29 cases in
+10.780 seconds (`b227832a-14c0-4808-94c1-5892b76091c1`). The child Cargo command was observed
+carrying the build configuration; no production source or lock changed. Beryl retains this
+configuration-correct integrated component receipt under the same task's `run-005`.
 
 Native cases exercise original HWND/client bounds and tracking, unchanged origin/focus/visibility,
 hidden first-publication authority, minimized refusal and actual restoration, maximized and
