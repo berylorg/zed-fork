@@ -155,6 +155,7 @@ impl TestAppContext {
             #[cfg(feature = "http-client")]
             http_client,
         );
+        app.borrow_mut().draw_dirty_windows_on_update = true;
 
         Self {
             app,

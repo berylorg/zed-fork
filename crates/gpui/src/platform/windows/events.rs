@@ -1269,7 +1269,7 @@ impl WindowsWindowInner {
     }
 
     #[inline]
-    fn draw_window(&self, handle: HWND, force_render: bool) -> Option<isize> {
+    pub(super) fn draw_window(&self, handle: HWND, force_render: bool) -> Option<isize> {
         if self.native_operation.borrow().native_destroyed {
             return Some(0);
         }

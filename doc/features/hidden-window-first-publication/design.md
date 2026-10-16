@@ -22,6 +22,10 @@ incomplete surface, then explicitly publish that same window as its first user-v
   preparation, and other ordinary preparation do not implicitly publish a hidden window.
 - Hidden construction retains the same GPUI window identity, root entity, native window, renderer
   ownership, callbacks, and configured properties that first publication later exposes.
+- Windows delivers normal frame callbacks to live never-published windows through its existing
+  coalesced vsync dispatch, even when native paint messages are absent while hidden. Dirty ordinary
+  root updates can therefore render and complete frames before publication. This does not force
+  every frame to render, acknowledge compositor paint, change visibility, or activate the window.
 - Construction options fix the initially windowed, maximized, or fullscreen native state before
   the hidden window is created. First publication preserves that state.
 - The root design's checked Windows minimum update may prepare an unpublished window's bounds

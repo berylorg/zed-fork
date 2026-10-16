@@ -213,6 +213,10 @@ impl WindowsWindowState {
 }
 
 impl WindowsWindowInner {
+    pub(super) fn is_never_published(&self) -> bool {
+        self.state.borrow().initial_placement.is_some()
+    }
+
     pub(super) fn minimum_initial_state(&self) -> Option<InitialWindowState> {
         self.state
             .borrow()

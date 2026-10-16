@@ -32,6 +32,34 @@ pointer-dispatch cases, nextest run `001846ed-569d-467f-b2d0-13687fa4f253`, on 2
 The default Beryl backend/App/Home library check also passed with test support disabled. Consumer
 acceptance details belong to [Beryl's mounting evidence](../../beryl/doc/audits/context-compaction-mount-readiness.md).
 
+## Test Rendering Ownership
+
+Deterministic `TestAppContext` owns automatic drawing of dirty windows when its update effects
+settle. Ordinary construction, `single` and `new_app` preserve that synchronous rendering boundary;
+cloning a context preserves its owner. Their rendering does not depend on a native event loop.
+
+A native `Application`, including one built with `test-support`, uses the ordinary native window
+frame path for dirty rendering and presentation. Enabling test support does not add automatic
+drawing at effect-flush boundaries to that application. Rendering ownership is fixed by context
+construction; callers do not toggle it through a public test mode or a per-window option.
+
+Initial window construction retains its explicit first draw. Dirty-before-key-dispatch drawing,
+explicit drawing and presentation helpers, native next-frame callbacks and frame completion keep
+their existing responsibilities. Drawing while hidden does not publish or activate the window.
+Test support cannot replace actual first-presentable readiness, current input geometry, native
+minimum acknowledgement or the identity and custody required for publication and destruction.
+
+On Windows, the existing coalesced native vsync dispatch also delivers normal frame callbacks to
+live never-published windows. Hidden preparation cannot depend on delivery of `WM_PAINT` to an
+invisible HWND. This uses the ordinary dirty/presentation checks and frame-completion path with
+forced rendering disabled; it does not introduce another clock, pump or effect-flush renderer.
+Already published windows retain their native paint path, including ordinary minimized behavior.
+
+Verification proves deterministic dirty updates render at their synchronous boundary, including
+new contexts, and native updates render through actual frames. Windows native acceptance includes
+hidden selected/threadless readiness, first publication, input/focus, minimum and close/recovery
+consumers. The ordinary build without test support preserves its native rendering behavior.
+
 ## Windows Native Save Destination Choice
 
 A narrow Windows save-choice capability returns one accepted destination and whether replacement

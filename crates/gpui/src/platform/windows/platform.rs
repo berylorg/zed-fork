@@ -935,9 +935,11 @@ impl WindowsPlatformInner {
 
     fn redraw_native_windows(&self, force_render: bool) {
         for window in self.native_window_snapshot() {
-            if window.native_operation.borrow().native_destroyed {
+            let native_destroyed = window.native_operation.borrow().native_destroyed;
+            if native_destroyed {
                 continue;
             }
+            let never_published = window.is_never_published();
             unsafe {
                 if force_render {
                     SendMessageW(
@@ -946,6 +948,8 @@ impl WindowsPlatformInner {
                         Some(WPARAM(self.validation_number)),
                         None,
                     );
+                } else if never_published {
+                    window.draw_window(window.hwnd, false);
                 } else {
                     let _ = RedrawWindow(Some(window.hwnd), None, None, RDW_INVALIDATE);
                 }

@@ -567,6 +567,8 @@ pub struct App {
     pub(crate) platform: Rc<dyn Platform>,
     text_system: Arc<TextSystem>,
     flushing_effects: bool,
+    #[cfg(any(test, feature = "test-support"))]
+    draw_dirty_windows_on_update: bool,
     pending_updates: usize,
     pub(crate) actions: Rc<ActionRegistry>,
     pub(crate) active_drag: Option<AnyDrag>,
@@ -690,6 +692,8 @@ impl App {
                 text_system,
                 actions: Rc::new(ActionRegistry::default()),
                 flushing_effects: false,
+                #[cfg(any(test, feature = "test-support"))]
+                draw_dirty_windows_on_update: false,
                 pending_updates: 0,
                 active_drag: None,
                 background_executor: executor,
@@ -1339,17 +1343,19 @@ impl App {
                 }
             } else {
                 #[cfg(any(test, feature = "test-support"))]
-                for window in self
-                    .windows
-                    .values()
-                    .filter_map(|window| {
-                        let window = window.as_deref()?;
-                        window.invalidator.is_dirty().then_some(window.handle)
-                    })
-                    .collect::<Vec<_>>()
-                {
-                    self.update_window(window, |_, window, cx| window.draw(cx).clear())
-                        .unwrap();
+                if self.draw_dirty_windows_on_update {
+                    for window in self
+                        .windows
+                        .values()
+                        .filter_map(|window| {
+                            let window = window.as_deref()?;
+                            window.invalidator.is_dirty().then_some(window.handle)
+                        })
+                        .collect::<Vec<_>>()
+                    {
+                        self.update_window(window, |_, window, cx| window.draw(cx).clear())
+                            .unwrap();
+                    }
                 }
 
                 if self.pending_effects.is_empty() {
