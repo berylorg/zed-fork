@@ -678,6 +678,9 @@ impl App {
             "must construct App on main thread"
         );
 
+        #[cfg(any(test, feature = "test-support"))]
+        util::measure("test-support measurement gate enabled", || ());
+
         let text_system = Arc::new(TextSystem::new(platform.text_system()));
         let entities = EntityMap::new();
         let keyboard_layout = platform.keyboard_layout();
@@ -1348,8 +1351,10 @@ impl App {
                     })
                     .collect::<Vec<_>>()
                 {
-                    self.update_window(window, |_, window, cx| window.draw(cx).clear())
-                        .unwrap();
+                    util::measure("test-support dirty draw", || {
+                        self.update_window(window, |_, window, cx| window.draw(cx).clear())
+                            .unwrap();
+                    });
                 }
 
                 if self.pending_effects.is_empty() {
