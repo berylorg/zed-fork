@@ -33,6 +33,8 @@ pub(crate) struct TestWindowState {
     pub(crate) should_close_handler: Option<Box<dyn FnMut() -> bool>>,
     hit_test_window_control_callback: Option<Box<dyn FnMut() -> Option<WindowControlArea>>>,
     input_callback: Option<Box<dyn FnMut(PlatformInput) -> DispatchEventResult>>,
+    #[cfg(target_os = "windows")]
+    input_handler_request_callback: Option<Box<dyn FnMut() -> bool>>,
     active_status_change_callback: Option<Box<dyn FnMut(bool)>>,
     hover_status_change_callback: Option<Box<dyn FnMut(bool)>>,
     resize_callback: Option<Box<dyn FnMut(Size<Pixels>, f32)>>,
@@ -135,6 +137,8 @@ impl TestWindow {
                 should_close_handler: None,
                 hit_test_window_control_callback: None,
                 input_callback: None,
+                #[cfg(target_os = "windows")]
+                input_handler_request_callback: None,
                 active_status_change_callback: None,
                 hover_status_change_callback: None,
                 resize_callback: None,
@@ -520,6 +524,16 @@ impl PlatformWindow for TestWindow {
 
     fn on_input(&self, callback: Box<dyn FnMut(crate::PlatformInput) -> DispatchEventResult>) {
         self.0.lock().input_callback = Some(callback)
+    }
+
+    #[cfg(target_os = "windows")]
+    fn on_input_handler_request(&self, callback: Box<dyn FnMut() -> bool>) {
+        let previous = self
+            .0
+            .lock()
+            .input_handler_request_callback
+            .replace(callback);
+        drop(previous);
     }
 
     fn on_active_status_change(&self, callback: Box<dyn FnMut(bool)>) {

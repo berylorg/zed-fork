@@ -60,6 +60,44 @@ new contexts, and native updates render through actual frames. Windows native ac
 hidden selected/threadless readiness, first publication, input/focus, minimum and close/recovery
 consumers. The ordinary build without test support preserves its native rendering behavior.
 
+## Native Text Input Handler Currentness On Windows
+
+Native character, dead-character and IME access resolves the handler for the original window's
+current focused, enabled editor. A valid focus change or interaction release cannot route text to
+an earlier painted editor or lose it merely because the next ordinary frame has not run. This
+applies to Unicode packet input as well as ordinary keyboard text, composition mutations and the
+selection/caret geometry and composition-state queries sharing the native handler boundary.
+
+Window owns focus, dirty rendering and the handler installed by painting. Before Windows selects
+that handler, a window-owned platform callback synchronizes the original window using the same
+bounded dirty draw and arena release as ordinary key dispatch. A clean window needs no draw.
+The callback finishes before native code resolves the handler or associated scale. It creates no
+input event, frame pump, timer, publication, activation or focus change and adds no eager drawing
+to App effect flushing. No previously extracted handler supplies this synchronization.
+
+Windows releases all state/native-operation borrows before entering the callback or handler.
+One access owns synchronization and handler use; nested access is refused without recursive draw
+or stale fallback. A missing callback, failed original-window update, destroyed owner or absent
+eligible current handler admits no text mutation. Disabled and startup-gated editors remain
+ineligible, and synchronization does not expose hidden windows or alter native operation custody.
+A never-published native owner admits no handler access even when its editor has logical focus
+and is enabled for preparation. Ordinary initially shown windows retain native text access.
+Returning an extracted handler preserves any newer registration or explicit clearing performed
+during its use, and never reinstalls it after destruction. Existing message parsing and composition
+ordering remain authoritative; native message handling alone is not acknowledgement of an edit.
+Every acquired native IME context is released on every exit, including refused or absent queries.
+
+Windows is the qualified native backend for this boundary. The internal platform seam and its test
+implementation preserve a clear owner for later backend support; they supply no reduced-guarantee
+Beryl startup path on Linux or macOS. Those Beryl platforms remain explicitly unsupported.
+
+Verification uses real HWND character delivery after enable/focus and between distinct editors,
+without waiting for a paint or drawing in the fixture. It proves only the current editor changes,
+checks disabled/hidden, removed-owner, nested-access and newer-registration/clearing refusal, and
+exercises dead-character and IME access through the shared boundary. Protocol-level IME cases do
+not qualify an installed OS IME. Preserve ordinary key synchronization and the build without test
+support, then qualify Beryl's unchanged native input and durable-save consumers independently.
+
 ## Windows Native Save Destination Choice
 
 A narrow Windows save-choice capability returns one accepted destination and whether replacement

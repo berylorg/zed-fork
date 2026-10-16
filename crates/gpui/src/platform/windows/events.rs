@@ -687,12 +687,11 @@ impl WindowsWindowInner {
     }
 
     fn handle_ime_position(&self, handle: HWND) -> Option<isize> {
+        let Some(caret_position) = self.retrieve_caret_position() else {
+            return Some(0);
+        };
         unsafe {
             let ctx = ImmGetContext(handle);
-
-            let Some(caret_position) = self.retrieve_caret_position() else {
-                return Some(0);
-            };
             {
                 let config = COMPOSITIONFORM {
                     dwStyle: CFS_POINT,
@@ -1340,23 +1339,76 @@ impl WindowsWindowInner {
     where
         F: FnOnce(&mut PlatformInputHandler) -> R,
     {
-        let mut input_handler = self.state.borrow_mut().input_handler.take()?;
-        let result = f(&mut input_handler);
-        self.state.borrow_mut().input_handler = Some(input_handler);
-        Some(result)
+        self.access_input_handler(|handler, _| f(handler))
     }
 
     fn with_input_handler_and_scale_factor<F, R>(&self, f: F) -> Option<R>
     where
         F: FnOnce(&mut PlatformInputHandler, f32) -> Option<R>,
     {
-        let mut lock = self.state.borrow_mut();
-        let mut input_handler = lock.input_handler.take()?;
-        let scale_factor = lock.scale_factor;
-        drop(lock);
-        let result = f(&mut input_handler, scale_factor);
-        self.state.borrow_mut().input_handler = Some(input_handler);
-        result
+        self.access_input_handler(f).flatten()
+    }
+
+    fn native_input_owner_available(&self) -> bool {
+        let closing_or_destroyed = {
+            let state = self.native_operation.borrow();
+            state.native_destroyed || state.destroy_requested
+        };
+        !closing_or_destroyed && !self.native_close_requested() && !self.is_never_published()
+    }
+
+    fn access_input_handler<R>(
+        &self,
+        f: impl FnOnce(&mut PlatformInputHandler, f32) -> R,
+    ) -> Option<R> {
+        if !self.state.borrow_mut().input_handler.begin_access() {
+            return None;
+        }
+        let mut handler = None;
+        let result = (|| {
+            if !self.native_input_owner_available() {
+                return None;
+            }
+            let mut callback = self
+                .state
+                .borrow_mut()
+                .callbacks
+                .input_handler_request
+                .take()?;
+            let synchronized = callback();
+            if self.native_input_owner_available() {
+                let mut state = self.state.borrow_mut();
+                if state.callbacks.input_handler_request.is_none() {
+                    state.callbacks.input_handler_request = Some(callback);
+                } else {
+                    drop(state);
+                    drop(callback);
+                }
+            } else {
+                drop(callback);
+            }
+            if !synchronized || !self.native_input_owner_available() {
+                return None;
+            }
+            let scale_factor = {
+                let mut state = self.state.borrow_mut();
+                handler = state.input_handler.take_current();
+                state.scale_factor
+            };
+            Some(f(handler.as_mut()?, scale_factor))
+        })();
+        let live = self.native_input_owner_available();
+        let obsolete = self
+            .state
+            .borrow_mut()
+            .input_handler
+            .finish_access(handler, live);
+        drop(obsolete);
+        if self.native_input_owner_available() {
+            result
+        } else {
+            None
+        }
     }
 }
 

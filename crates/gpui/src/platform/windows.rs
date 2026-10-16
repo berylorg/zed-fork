@@ -10,6 +10,7 @@ mod directx_renderer;
 mod dispatcher;
 mod display;
 mod events;
+mod input_handler_access;
 mod keyboard;
 mod native_operation;
 mod placement;

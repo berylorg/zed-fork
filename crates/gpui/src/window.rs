@@ -1248,6 +1248,18 @@ impl Window {
                     .unwrap_or(DispatchEventResult::default())
             })
         });
+        #[cfg(target_os = "windows")]
+        platform_window.on_input_handler_request({
+            let mut cx = cx.to_async();
+            Box::new(move || {
+                handle
+                    .update(&mut cx, |_, window, cx| {
+                        window.synchronize_input(cx);
+                        !window.removed
+                    })
+                    .unwrap_or(false)
+            })
+        });
         platform_window.on_hit_test_window_control({
             let mut cx = cx.to_async();
             Box::new(move || {
@@ -4240,10 +4252,14 @@ impl Window {
         }
     }
 
-    fn dispatch_key_event(&mut self, event: &dyn Any, cx: &mut App) {
+    fn synchronize_input(&mut self, cx: &mut App) {
         if self.invalidator.is_dirty() {
             self.draw(cx).clear();
         }
+    }
+
+    fn dispatch_key_event(&mut self, event: &dyn Any, cx: &mut App) {
+        self.synchronize_input(cx);
 
         let node_id = self.focus_node_id_in_rendered_frame(self.focus);
         let dispatch_path = self.rendered_frame.dispatch_tree.dispatch_path(node_id);

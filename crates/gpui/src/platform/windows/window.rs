@@ -41,7 +41,7 @@ pub struct WindowsWindowState {
     pub restore_from_minimized: Option<Box<dyn FnMut(RequestFrameOptions)>>,
 
     pub callbacks: Callbacks,
-    pub input_handler: Option<PlatformInputHandler>,
+    pub(super) input_handler: super::input_handler_access::InputHandlerAccess<PlatformInputHandler>,
     pub pending_surrogate: Option<u16>,
     pub last_reported_modifiers: Option<Modifiers>,
     pub last_reported_capslock: Option<Capslock>,
@@ -114,7 +114,7 @@ impl WindowsWindowState {
         let renderer = DirectXRenderer::new(hwnd, directx_devices, disable_direct_composition)
             .context("Creating DirectX renderer")?;
         let callbacks = Callbacks::default();
-        let input_handler = None;
+        let input_handler = super::input_handler_access::InputHandlerAccess::default();
         let pending_surrogate = None;
         let last_reported_modifiers = None;
         let last_reported_capslock = None;
@@ -367,6 +367,7 @@ impl WindowsWindowInner {
 pub(crate) struct Callbacks {
     pub(crate) request_frame: Option<Box<dyn FnMut(RequestFrameOptions)>>,
     pub(crate) input: Option<Box<dyn FnMut(crate::PlatformInput) -> DispatchEventResult>>,
+    pub(crate) input_handler_request: Option<Box<dyn FnMut() -> bool>>,
     pub(crate) active_status_change: Option<Box<dyn FnMut(bool)>>,
     pub(crate) hovered_status_change: Option<Box<dyn FnMut(bool)>>,
     pub(crate) resize: Option<Box<dyn FnMut(Size<Pixels>, f32)>>,
@@ -881,7 +882,13 @@ impl PlatformWindow for WindowsWindow {
     }
 
     fn set_input_handler(&mut self, input_handler: PlatformInputHandler) {
-        self.0.state.borrow_mut().input_handler = Some(input_handler);
+        let previous = self
+            .0
+            .state
+            .borrow_mut()
+            .input_handler
+            .register(input_handler);
+        drop(previous);
     }
 
     fn take_input_handler(&mut self) -> Option<PlatformInputHandler> {
@@ -1132,6 +1139,17 @@ impl PlatformWindow for WindowsWindow {
 
     fn on_input(&self, callback: Box<dyn FnMut(PlatformInput) -> DispatchEventResult>) {
         self.0.state.borrow_mut().callbacks.input = Some(callback);
+    }
+
+    fn on_input_handler_request(&self, callback: Box<dyn FnMut() -> bool>) {
+        let previous = self
+            .0
+            .state
+            .borrow_mut()
+            .callbacks
+            .input_handler_request
+            .replace(callback);
+        drop(previous);
     }
 
     fn on_active_status_change(&self, callback: Box<dyn FnMut(bool)>) {
